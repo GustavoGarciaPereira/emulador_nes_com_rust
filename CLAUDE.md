@@ -43,12 +43,13 @@ nes-emulator/
     ├── cpu.rs          # CPU MOS 6502 (completa: oficiais + ilegais)
     ├── bus.rs          # Barramento de memória com mapa do NES
     ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM)
-    └── ppu.rs          # PPU: rendering de background, VBlank, NMI
+    ├── ppu.rs          # PPU: rendering de background, VBlank, NMI
+    └── apu.rs          # APU: Pulse 1, Pulse 2, Triangle, Noise
 ```
 
-> **Estado atual:** CPU, Bus, Cartridge, Mapper 0 e PPU básica implementados.
-> O pipeline completo funciona: `step_frame()` roda um frame inteiro, `get_framebuffer()` retorna o buffer RGB para o Pygame.
-> `apu.rs` e input ainda não existem — próximas etapas.
+> **Estado atual:** CPU, Bus, Cartridge, Mapper 0, PPU, Input e APU implementados.
+> O pipeline completo funciona: `step_frame()` roda um frame inteiro, `get_framebuffer()` retorna o buffer RGB e `get_audio_samples()` retorna amostras f32 para o Pygame.
+> Próxima etapa: suporte a mappers adicionais (MMC1, UxROM, etc.).
 
 ---
 
@@ -95,19 +96,22 @@ python tools/test_cartridge.py
 
 Mapeamento de memória real do NES:
 
-| Range          | Destino                                                      |
-|----------------|--------------------------------------------------------------|
-| 0x0000–0x1FFF  | RAM interna 2 KB (espelhada via & 0x07FF)                    |
-| 0x2000–0x3FFF  | PPU registers — delegado a `Ppu::read/write_register`        |
-| 0x4014         | OAM DMA — copia 256 bytes da RAM page para `ppu.oam`        |
-| 0x4016         | Controlador 1 — leitura/escrita serial (strobe + shift reg) |
-| 0x4017         | Controlador 2 — stub (retorna 0x40)                         |
-| 0x4000–0x401F  | APU / IO (stub — retorna 0)                                  |
-| 0x4020–0x7FFF  | Expansão / SRAM (stub — retorna 0)                           |
-| 0x8000–0xFFFF  | PRG-ROM via `Cartridge::read_prg()`                          |
+| Range                         | Destino                                                      |
+|-------------------------------|--------------------------------------------------------------|
+| 0x0000–0x1FFF                 | RAM interna 2 KB (espelhada via & 0x07FF)                    |
+| 0x2000–0x3FFF                 | PPU registers — delegado a `Ppu::read/write_register`        |
+| 0x4014                        | OAM DMA — copia 256 bytes da RAM page para `ppu.oam`        |
+| 0x4015 (leitura)              | APU status — stub (retorna 0)                               |
+| 0x4016 (leitura)              | Controlador 1 — serial (strobe + shift reg)                 |
+| 0x4017 (leitura)              | Controlador 2 — stub (retorna 0x40)                         |
+| 0x4000–0x4013, 0x4015, 0x4017 (escrita) | APU — `apu.write(addr, value)`               |
+| 0x4016 (escrita)              | Controlador — strobe                                        |
+| 0x4018–0x401F                 | Expansão — ignorado                                         |
+| 0x4020–0x7FFF                 | Expansão / SRAM (stub — retorna 0)                           |
+| 0x8000–0xFFFF                 | PRG-ROM via `Cartridge::read_prg()`                          |
 
 - `Bus::read` é `&mut self` (registradores PPU têm side effects na leitura)
-- `Bus` possui `pub ppu: Ppu`, `controller1`, `controller1_shift`, `controller_strobe`
+- `Bus` possui `pub ppu: Ppu`, `pub apu: Apu`, `controller1`, `controller1_shift`, `controller_strobe`
 - OAM DMA lê diretamente de `self.ram` (evita recursão em `self.read`)
 
 ### ✅ Cartridge + Mapper 0 (`src/cartridge.rs`) — IMPLEMENTADO
@@ -201,7 +205,48 @@ Mapeamento de memória real do NES:
 | 1   | Left   | ←      |
 | 0   | Right  | →      |
 
-### ⬜ APU (`src/apu.rs`) — FUTURA
+### ✅ APU (`src/apu.rs`) — IMPLEMENTADO
+
+**Canais:**
+
+| Canal    | Struct    | Detalhes                                                                 |
+|----------|-----------|--------------------------------------------------------------------------|
+| Pulse 1  | `Pulse`   | Duty cycle (4 padrões), envelope, length counter, sweep (negate com −1 extra) |
+| Pulse 2  | `Pulse`   | Igual ao Pulse 1; sweep negate sem o −1 extra                           |
+| Triangle | `Triangle`| Sequência fixa 32 passos, linear counter + length counter; timer_period < 2 silenciado |
+| Noise    | `Noise`   | LFSR 15-bit, modo normal (bit 1) e curto (bit 6), envelope + length counter |
+
+**Frame counter** (`frame_mode` = false → 4-step, true → 5-step):
+
+| Ciclo CPU | 4-step          | 5-step          |
+|-----------|-----------------|-----------------|
+| 3729      | quarter         | quarter         |
+| 7457      | quarter + half  | quarter + half  |
+| 11186     | quarter         | quarter         |
+| 14915     | quarter + half + reset | —        |
+| 18641     | —               | quarter + half + reset |
+
+- **Quarter frame:** clock envelope (Pulse 1, Pulse 2, Noise) + linear counter (Triangle)
+- **Half frame:** clock length counters + sweep (Pulse 1, Pulse 2, Triangle, Noise)
+- Sweep mute: `timer_period < 8` ou overflow (`target > 0x7FF` no modo positivo)
+- Timer do Triangle cloca a cada ciclo de CPU; Pulse e Noise clocam a cada 2 ciclos (divisor APU)
+
+**Geração de áudio:**
+- Taxa: 44100 Hz (acumulador `sample_accum += 44100.0 / 1_789_773.0` por ciclo de CPU)
+- ~733 amostras f32 por frame
+- Mixing linear: `pulse_out = 0.00752 × (p1 + p2)`, `tnd_out = 0.00851 × tri + 0.00494 × noise`
+
+**Mapeamento de registradores (Bus):**
+
+| Range                    | Destino             |
+|--------------------------|---------------------|
+| 0x4000–0x4013, 0x4015, 0x4017 | `apu.write(addr, value)` |
+| Leitura 0x4015           | 0 (stub)            |
+
+**Frontend (main.py):**
+- `pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)`
+- `play_audio`: converte f32 → int16 → stereo com `np.column_stack` → `pygame.sndarray.make_sound` → `sound.play()`
+- Dependência: `numpy` (instalada no venv)
 
 ---
 
@@ -231,9 +276,10 @@ nes.mem_read(addr: u16)           # -> u8  (lê da memória mapeada, &mut — te
 nes.mem_write(addr: u16, val: u8) # escreve na memória mapeada
 nes.set_pc(addr: u16)             # força PC (usado pelo nestest.py)
 nes.set_input(buttons: u8)        # atualiza estado do controle 1 (bitmask, ver tabela de botões)
+nes.get_audio_samples()           # -> Vec<f32>  (~733 amostras por frame a 44100 Hz; esvazia o buffer)
 ```
 
-> **Próximo passo:** APU para áudio.
+> **Próximo passo:** suporte a mappers adicionais (MMC1, UxROM, etc.).
 
 ---
 
