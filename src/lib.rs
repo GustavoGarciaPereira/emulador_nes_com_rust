@@ -102,6 +102,10 @@ impl Nes {
         self.cpu.pc = addr;
     }
 
+    fn set_input(&mut self, buttons: u8) {
+        self.bus.controller1 = buttons;
+    }
+
     /// Carrega uma ROM iNES, inicializa PPU com chr_rom/mirroring e faz reset da CPU.
     fn load_rom(&mut self, path: &str) -> PyResult<()> {
         let data = std::fs::read(path)

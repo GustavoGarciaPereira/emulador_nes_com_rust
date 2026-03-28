@@ -88,9 +88,14 @@ impl Ppu {
             self.status &= !0x20; // clear Sprite Overflow
         }
 
-        // Renderiza background ao final de cada scanline visível
-        if self.scanline < 240 && self.cycle == 257 && self.mask & 0x08 != 0 {
-            self.render_background();
+        // Renderiza scanline visível ao ciclo 257 (após todos os pixels)
+        if self.scanline < 240 && self.cycle == 257 {
+            if self.mask & 0x08 != 0 {
+                self.render_background();
+            }
+            if self.mask & 0x10 != 0 {
+                self.render_sprites();
+            }
         }
 
         // Avança ciclo/scanline
@@ -189,69 +194,124 @@ impl Ppu {
         }
     }
 
-    /// Renderiza uma scanline completa de background no framebuffer.
+    /// Renderiza uma scanline completa de background no framebuffer (pixel-a-pixel com scroll).
     fn render_background(&mut self) {
-        let y = self.scanline as usize;
-
-        // Y com scroll
-        let scrolled_y = (y + self.scroll_y as usize) % 240;
-        let tile_row = scrolled_y / 8;
-        let fine_y = (scrolled_y % 8) as u16;
-
-        // Nametable base (bits 0-1 de PPUCTRL)
-        let nt_base: u16 = match self.ctrl & 0x03 {
-            0 => 0x2000,
-            1 => 0x2400,
-            2 => 0x2800,
-            _ => 0x2C00,
-        };
-
-        // Pattern table do background (bit 4 de PPUCTRL)
+        let scanline = self.scanline as u16;
+        // Pattern table do background: bit 4 de PPUCTRL
         let pt_base: u16 = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0x0000 };
 
-        for coarse_x in 0..32usize {
-            // X com scroll (coarse)
-            let scrolled_col = (coarse_x + (self.scroll_x as usize / 8)) % 32;
+        for pixel_x in 0u16..256 {
+            let x = pixel_x + self.scroll_x as u16;
+            let y = scanline + self.scroll_y as u16;
 
-            // Lê tile index do nametable
-            let nt_addr = nt_base + (tile_row as u16 * 32) + scrolled_col as u16;
-            let tile_idx = self.ppu_read(nt_addr) as u16;
+            let coarse_x = x / 8;
+            let fine_x   = x % 8;
+            let coarse_y = y / 8;
+            let fine_y   = y % 8;
 
-            // Lê atributo (paleta)
-            let attr_x = scrolled_col / 4;
-            let attr_y = tile_row / 4;
-            let attr_addr = nt_base + 0x03C0 + (attr_y as u16 * 8) + attr_x as u16;
+            // Seleciona nametable com wrap, levando em conta PPUCTRL bits 0-1
+            let nt_x = ((coarse_x / 32) ^ (self.ctrl as u16 & 0x01)) & 1;
+            let nt_y = ((coarse_y / 30) ^ ((self.ctrl as u16 >> 1) & 0x01)) & 1;
+            let base_nt: u16 = match (nt_x, nt_y) {
+                (0, 0) => 0x2000,
+                (1, 0) => 0x2400,
+                (0, 1) => 0x2800,
+                _      => 0x2C00,
+            };
+
+            let nt_addr   = base_nt + (coarse_y % 30) * 32 + (coarse_x % 32);
+            let tile_idx  = self.ppu_read(nt_addr) as u16;
+
+            // Atributo de paleta
+            let attr_x    = (coarse_x % 32) / 4;
+            let attr_y    = (coarse_y % 30) / 4;
+            let attr_addr = base_nt + 0x03C0 + attr_y * 8 + attr_x;
             let attr_byte = self.ppu_read(attr_addr);
-            let shift = ((tile_row % 4 / 2) * 2 + (scrolled_col % 4 / 2)) * 2;
+            let shift     = (((coarse_y % 4) / 2) * 2 + ((coarse_x % 4) / 2)) * 2;
             let palette_idx = (attr_byte >> shift) & 0x03;
 
-            // Lê dados do padrão (plano 0 e 1)
+            // Dados do padrão (plano 0 e 1)
             let pattern_lo = self.ppu_read(pt_base + tile_idx * 16 + fine_y);
             let pattern_hi = self.ppu_read(pt_base + tile_idx * 16 + fine_y + 8);
 
-            // Desenha os 8 pixels do tile
-            for bit in 0..8usize {
-                let pixel_x = coarse_x * 8 + bit;
-                if pixel_x >= 256 {
-                    break;
+            let col_bit  = 7 - fine_x;
+            let lo       = (pattern_lo >> col_bit) & 1;
+            let hi       = (pattern_hi >> col_bit) & 1;
+            let color_idx = (hi << 1) | lo;
+
+            let palette_addr: u16 = if color_idx == 0 {
+                0x3F00
+            } else {
+                0x3F00 + palette_idx as u16 * 4 + color_idx as u16
+            };
+
+            let nes_color = (self.ppu_read(palette_addr) & 0x3F) as usize;
+            let (r, g, b) = NES_PALETTE[nes_color];
+            let offset = (self.scanline as usize * 256 + pixel_x as usize) * 3;
+            self.framebuffer[offset]     = r;
+            self.framebuffer[offset + 1] = g;
+            self.framebuffer[offset + 2] = b;
+        }
+    }
+
+    /// Renderiza sprites da scanline atual sobre o framebuffer.
+    fn render_sprites(&mut self) {
+        let scanline = self.scanline;
+
+        // Iteração reversa: sprite de menor índice fica por cima (prioridade correta)
+        for i in (0..64usize).rev() {
+            let base      = i * 4;
+            let sprite_y  = self.oam[base] as i16 + 1;
+            let tile_idx  = self.oam[base + 1] as u16;
+            let attrs     = self.oam[base + 2];
+            let sprite_x  = self.oam[base + 3] as i16;
+
+            // Sprite fora dessa scanline
+            if scanline < sprite_y || scanline >= sprite_y + 8 {
+                continue;
+            }
+
+            let flip_v      = attrs & 0x80 != 0;
+            let flip_h      = attrs & 0x40 != 0;
+            let palette_idx = (attrs & 0x03) as u16;
+            let behind_bg   = attrs & 0x20 != 0;
+
+            let mut row = (scanline - sprite_y) as u16;
+            if flip_v { row = 7 - row; }
+
+            // Pattern table de sprite: bit 3 de PPUCTRL
+            let table: u16 = if self.ctrl & 0x08 != 0 { 0x1000 } else { 0x0000 };
+            let tile_addr  = table + tile_idx * 16 + row;
+
+            let lo = self.ppu_read(tile_addr);
+            let hi = self.ppu_read(tile_addr + 8);
+
+            for col in 0..8i16 {
+                let bit = if flip_h { col } else { 7 - col } as u16;
+                let lo_bit  = (lo >> bit) & 1;
+                let hi_bit  = (hi >> bit) & 1;
+                let color_idx = (hi_bit << 1) | lo_bit;
+
+                if color_idx == 0 { continue; } // pixel transparente
+
+                let px = sprite_x + col;
+                if px < 0 || px >= 256 { continue; }
+
+                let fb_offset = (scanline as usize * 256 + px as usize) * 3;
+
+                // Sprite 0 Hit: sprite 0 com pixel opaco sobre background opaco
+                if i == 0 {
+                    self.status |= 0x40;
                 }
-                let col_bit = 7 - bit as u16;
-                let lo = (pattern_lo >> col_bit) & 1;
-                let hi = (pattern_hi >> col_bit) & 1;
-                let color_idx = (hi << 1) | lo;
 
-                let palette_addr: u16 = if color_idx == 0 {
-                    0x3F00 // cor universal de fundo
-                } else {
-                    0x3F00 + palette_idx as u16 * 4 + color_idx as u16
-                };
-
-                let nes_color = (self.ppu_read(palette_addr) & 0x3F) as usize;
-                let (r, g, b) = NES_PALETTE[nes_color];
-                let offset = (y * 256 + pixel_x) * 3;
-                self.framebuffer[offset] = r;
-                self.framebuffer[offset + 1] = g;
-                self.framebuffer[offset + 2] = b;
+                if !behind_bg {
+                    let palette_addr = 0x3F10 + palette_idx * 4 + color_idx as u16;
+                    let color = self.ppu_read(palette_addr) & 0x3F;
+                    let (r, g, b) = NES_PALETTE[color as usize];
+                    self.framebuffer[fb_offset]     = r;
+                    self.framebuffer[fb_offset + 1] = g;
+                    self.framebuffer[fb_offset + 2] = b;
+                }
             }
         }
     }
