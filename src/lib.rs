@@ -1,3 +1,4 @@
+mod apu;
 mod bus;
 mod cartridge;
 mod cpu;
@@ -32,6 +33,9 @@ impl Nes {
     /// Executa uma instrução, roda 3 ciclos de PPU por ciclo de CPU e verifica NMI.
     fn step(&mut self) -> u8 {
         let cpu_cycles = self.cpu.step(&mut self.bus);
+        for _ in 0..cpu_cycles {
+            self.bus.apu.tick();
+        }
         for _ in 0..(cpu_cycles as u32 * 3) {
             self.bus.ppu.tick();
             if self.bus.ppu.nmi_triggered {
@@ -47,6 +51,9 @@ impl Nes {
         let frame = self.bus.ppu.frame;
         while self.bus.ppu.frame == frame {
             let cpu_cycles = self.cpu.step(&mut self.bus);
+            for _ in 0..cpu_cycles {
+                self.bus.apu.tick();
+            }
             for _ in 0..(cpu_cycles as u32 * 3) {
                 self.bus.ppu.tick();
                 if self.bus.ppu.nmi_triggered {
@@ -104,6 +111,11 @@ impl Nes {
 
     fn set_input(&mut self, buttons: u8) {
         self.bus.controller1 = buttons;
+    }
+
+    /// Retorna e esvazia o buffer de amostras de áudio (f32, ~735 por frame a 44100 Hz).
+    fn get_audio_samples(&mut self) -> Vec<f32> {
+        self.bus.apu.take_samples()
     }
 
     /// Carrega uma ROM iNES, inicializa PPU com chr_rom/mirroring e faz reset da CPU.

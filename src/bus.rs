@@ -1,3 +1,4 @@
+use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::ppu::Ppu;
 
@@ -5,6 +6,7 @@ pub struct Bus {
     pub ram: [u8; 2048],
     pub cartridge: Option<Cartridge>,
     pub ppu: Ppu,
+    pub apu: Apu,
     pub controller1: u8,        // estado atual dos botões (bitmask)
     pub controller1_shift: u8,  // registrador de shift para leitura serial
     pub controller_strobe: bool,
@@ -16,6 +18,7 @@ impl Bus {
             ram: [0u8; 2048],
             cartridge: None,
             ppu: Ppu::new(),
+            apu: Apu::new(),
             controller1: 0,
             controller1_shift: 0,
             controller_strobe: false,
@@ -38,6 +41,8 @@ impl Bus {
             }
             // Controlador 2 — não implementado
             0x4017 => 0x40,
+            // APU status
+            0x4015 => 0, // stub: retorna 0 (sem IRQ, sem DMC)
             // APU / IO — stub
             0x4000..=0x401F => 0,
             // Expansão / SRAM — stub
@@ -77,7 +82,10 @@ impl Bus {
                     self.controller1_shift = self.controller1; // trava estado atual
                 }
             }
-            0x4000..=0x401F => {} // APU/IO — stub
+            // APU: Pulse 1, Pulse 2, Triangle, Noise, DMC, status, frame counter
+            // (0x4014 = OAM DMA e 0x4016 = controller já tratados acima)
+            0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write(addr, value),
+            0x4018..=0x401F => {} // expansão — ignorado
             0x4020..=0xFFFF => {} // Escrita em ROM ignorada no Mapper 0
         }
     }
