@@ -1,0 +1,58 @@
+# ── Rust ──────────────────────────────────────────────────────────────────────
+/target/
+Cargo.lock
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Empacotamento / distribuição
+*.egg-info/
+*.egg
+dist/
+build/
+develop-eggs/
+eggs/
+sdist/
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Cobertura de testes
+htmlcov/
+.tox/
+.coverage
+.cache
+coverage.xml
+nosetests.xml
+
+# ── maturin / extensão compilada ──────────────────────────────────────────────
+*.so
+*.pyd
+
+# ── ROMs (não commitar ROMs proprietárias) ────────────────────────────────────
+roms/*.nes
+!roms/nestest.nes
+roms/*.sfc
+roms/*.sms
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.ropeproject
+.python-version
+*.swp
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
