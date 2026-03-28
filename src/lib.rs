@@ -125,9 +125,15 @@ impl Nes {
         let cart = Cartridge::from_bytes(&data)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
-        // Copia CHR-ROM e mirroring para a PPU (acesso direto sem conflito de borrow)
+        // Copia CHR-ROM, CHR-RAM, mirroring e estado MMC1 para a PPU
+        // (acesso direto sem conflito de borrow)
         self.bus.ppu.chr_rom = cart.chr_rom.clone();
+        self.bus.ppu.chr_ram = cart.chr_ram.clone();
         self.bus.ppu.mirroring = cart.mirroring;
+        self.bus.ppu.mapper = cart.mapper;
+        self.bus.ppu.mmc1_chr0 = cart.mmc1_chr0;
+        self.bus.ppu.mmc1_chr1 = cart.mmc1_chr1;
+        self.bus.ppu.mmc1_control = cart.mmc1_control;
 
         self.bus.cartridge = Some(cart);
         self.cpu.reset(&mut self.bus);

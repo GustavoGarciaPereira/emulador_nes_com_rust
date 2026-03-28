@@ -17,9 +17,16 @@ pub struct Ppu {
     pub palette: [u8; 32],      // paleta
     pub oam: [u8; 256],         // sprites
 
-    // CHR-ROM e mirroring (copiados do cartucho no load_rom)
+    // CHR-ROM, CHR-RAM e mirroring (copiados do cartucho no load_rom)
     pub chr_rom: Vec<u8>,
+    pub chr_ram: Vec<u8>,       // 8 KB — usado quando chr_rom está vazio (CHR-RAM)
     pub mirroring: Mirroring,
+
+    // Estado MMC1 para bank switching de CHR (sincronizado do Cartridge pelo Bus)
+    pub mapper: u8,
+    pub mmc1_chr0: u8,
+    pub mmc1_chr1: u8,
+    pub mmc1_control: u8,
 
     // Registradores
     pub ctrl: u8,               // 0x2000
@@ -50,7 +57,12 @@ impl Ppu {
             palette: [0u8; 32],
             oam: [0u8; 256],
             chr_rom: Vec::new(),
+            chr_ram: Vec::new(),
             mirroring: Mirroring::Horizontal,
+            mapper: 0,
+            mmc1_chr0: 0,
+            mmc1_chr1: 0,
+            mmc1_control: 0x0C,
             ctrl: 0,
             mask: 0,
             status: 0,
@@ -186,6 +198,9 @@ impl Ppu {
                 } else if (0x2000..=0x3EFF).contains(&addr) {
                     let mirrored = mirror_vram_addr(addr, self.mirroring) as usize;
                     self.vram[mirrored] = value;
+                } else if addr < 0x2000 && !self.chr_ram.is_empty() {
+                    // Escrita em CHR-RAM
+                    self.chr_ram[addr as usize] = value;
                 }
                 let inc: u16 = if self.ctrl & 0x04 != 0 { 32 } else { 1 };
                 self.vram_addr = self.vram_addr.wrapping_add(inc);
@@ -316,13 +331,32 @@ impl Ppu {
         }
     }
 
-    /// Lê do espaço de endereçamento da PPU (CHR-ROM, VRAM, paleta).
+    /// Lê do espaço de endereçamento da PPU (CHR-ROM/RAM, VRAM, paleta).
     fn ppu_read(&self, addr: u16) -> u8 {
         let addr = addr & 0x3FFF;
         match addr {
             0x0000..=0x1FFF => {
                 if self.chr_rom.is_empty() {
-                    0
+                    // CHR-RAM (Mapper 0 sem CHR-ROM ou Mapper 1 com CHR-RAM)
+                    self.chr_ram.get(addr as usize).copied().unwrap_or(0)
+                } else if self.mapper == 1 {
+                    // MMC1: bank switching de CHR
+                    let chr_mode = (self.mmc1_control >> 4) & 1;
+                    if chr_mode == 0 {
+                        // 8KB mode
+                        let bank = (self.mmc1_chr0 & 0xFE) as usize;
+                        let offset = bank * 0x2000 + addr as usize;
+                        self.chr_rom.get(offset % self.chr_rom.len()).copied().unwrap_or(0)
+                    } else {
+                        // 4KB mode
+                        if addr < 0x1000 {
+                            let offset = self.mmc1_chr0 as usize * 0x1000 + addr as usize;
+                            self.chr_rom.get(offset % self.chr_rom.len()).copied().unwrap_or(0)
+                        } else {
+                            let offset = self.mmc1_chr1 as usize * 0x1000 + (addr - 0x1000) as usize;
+                            self.chr_rom.get(offset % self.chr_rom.len()).copied().unwrap_or(0)
+                        }
+                    }
                 } else {
                     self.chr_rom[addr as usize % self.chr_rom.len()]
                 }
@@ -365,6 +399,8 @@ fn mirror_vram_addr(addr: u16, mirroring: Mirroring) -> u16 {
         (Mirroring::Horizontal, 1) => 0,
         (Mirroring::Horizontal, 2) => 1,
         (Mirroring::Horizontal, 3) => 1,
+        (Mirroring::SingleScreenLow,  _) => 0,
+        (Mirroring::SingleScreenHigh, _) => 1,
         _ => 0, // FourScreen e fallback: usa nametable 0
     };
 

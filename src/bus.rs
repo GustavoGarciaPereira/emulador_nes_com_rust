@@ -86,7 +86,24 @@ impl Bus {
             // (0x4014 = OAM DMA e 0x4016 = controller já tratados acima)
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write(addr, value),
             0x4018..=0x401F => {} // expansão — ignorado
-            0x4020..=0xFFFF => {} // Escrita em ROM ignorada no Mapper 0
+            0x4020..=0x7FFF => {} // Expansão / SRAM — ignorado
+            0x8000..=0xFFFF => {
+                // Escreve no mapper (MMC1 shift register, etc.)
+                // Lê o estado atualizado em variáveis locais para evitar conflito de borrow
+                // entre self.cartridge e self.ppu
+                let sync = if let Some(cart) = &mut self.cartridge {
+                    cart.write_prg(addr, value);
+                    Some((cart.mmc1_chr0, cart.mmc1_chr1, cart.mmc1_control, cart.mirroring))
+                } else {
+                    None
+                };
+                if let Some((chr0, chr1, control, mirroring)) = sync {
+                    self.ppu.mmc1_chr0 = chr0;
+                    self.ppu.mmc1_chr1 = chr1;
+                    self.ppu.mmc1_control = control;
+                    self.ppu.mirroring = mirroring;
+                }
+            }
         }
     }
 }
