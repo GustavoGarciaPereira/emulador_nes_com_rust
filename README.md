@@ -21,11 +21,11 @@ A Nintendo Entertainment System emulator written in **Rust** (core) + **Python**
 
 | Mega Man II — título (Mapper 1) | Mario Bros — título (Mapper 0) |
 |:---:|:---:|
-| ![Mega Man II](docs/image.png) | ![Mario Bros título](docs/image%20copy.png) |
+| ![Mega Man II](docs/megaman2-title.png) | ![Mario Bros título](docs/mario-bros-title.png) |
 
 | Mario Bros — gameplay |
 |:---:|
-| ![Mario Bros gameplay](docs/image%20copy%202.png) |
+| ![Mario Bros gameplay](docs/mario-bros-gameplay.png) |
 
 </div>
 
