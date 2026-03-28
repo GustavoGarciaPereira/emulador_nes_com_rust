@@ -7,7 +7,7 @@ Emulador do Nintendo Entertainment System (NES) com arquitetura híbrida:
 - **Python** cuida do frontend: janela, input do usuário e rendering via Pygame.
 - **Bridge** entre os dois via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/), gerando uma biblioteca `.so` importável pelo Python.
 
-O objetivo é ter um emulador funcional capaz de rodar ROMs NES reais, começando pelo suporte ao mapper 0 (NROM).
+O objetivo é ter um emulador funcional capaz de rodar ROMs NES reais, com suporte aos mappers 0 (NROM) e 1 (MMC1).
 
 ---
 
@@ -42,14 +42,14 @@ nes-emulator/
     ├── lib.rs          # Bridge PyO3 — expõe struct Nes ao Python
     ├── cpu.rs          # CPU MOS 6502 (completa: oficiais + ilegais)
     ├── bus.rs          # Barramento de memória com mapa do NES
-    ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM)
+    ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM) + Mapper 1 (MMC1)
     ├── ppu.rs          # PPU: rendering de background, VBlank, NMI
     └── apu.rs          # APU: Pulse 1, Pulse 2, Triangle, Noise
 ```
 
-> **Estado atual:** CPU, Bus, Cartridge, Mapper 0, PPU, Input e APU implementados.
+> **Estado atual:** CPU, Bus, Cartridge (Mapper 0 + Mapper 1/MMC1), PPU, Input e APU implementados.
 > O pipeline completo funciona: `step_frame()` roda um frame inteiro, `get_framebuffer()` retorna o buffer RGB e `get_audio_samples()` retorna amostras f32 para o Pygame.
-> Próxima etapa: suporte a mappers adicionais (MMC1, UxROM, etc.).
+> Próxima etapa: suporte a mappers adicionais (UxROM/Mapper 2, MMC3/Mapper 4, etc.).
 
 ---
 
@@ -108,23 +108,56 @@ Mapeamento de memória real do NES:
 | 0x4016 (escrita)              | Controlador — strobe                                        |
 | 0x4018–0x401F                 | Expansão — ignorado                                         |
 | 0x4020–0x7FFF                 | Expansão / SRAM (stub — retorna 0)                           |
-| 0x8000–0xFFFF                 | PRG-ROM via `Cartridge::read_prg()`                          |
+| 0x8000–0xFFFF                 | PRG-ROM via `Cartridge::read_prg()`; escritas vão para `Cartridge::write_prg()` (mapper) |
 
 - `Bus::read` é `&mut self` (registradores PPU têm side effects na leitura)
 - `Bus` possui `pub ppu: Ppu`, `pub apu: Apu`, `controller1`, `controller1_shift`, `controller_strobe`
 - OAM DMA lê diretamente de `self.ram` (evita recursão em `self.read`)
+- Escritas em 0x8000–0xFFFF chamam `cart.write_prg()` e sincronizam o estado MMC1 (`mmc1_chr0/chr1/control/mirroring`) para a PPU via variáveis locais (evita conflito de borrow entre `self.cartridge` e `self.ppu`)
 
-### ✅ Cartridge + Mapper 0 (`src/cartridge.rs`) — IMPLEMENTADO
+### ✅ Cartridge + Mapper 0 + Mapper 1/MMC1 (`src/cartridge.rs`) — IMPLEMENTADO
 
-- Parser do formato iNES (header 16 bytes):
-  - Valida magic `NES\x1A`
-  - Lê PRG-ROM (byte 4 × 16 KB) e CHR-ROM (byte 5 × 8 KB)
-  - Extrai mapper = `(flags7 & 0xF0) | (flags6 >> 4)`
-  - Lê mirroring (horizontal / vertical / four-screen) — `Mirroring` é `Copy`
-  - Desconta trainer opcional (512 bytes, bit 2 do flags6)
-- Retorna `Err` para mapper ≠ 0
-- `read_prg` usa `addr % prg_rom.len()` — cobre NROM-128 (16 KB, espelhado) e NROM-256 (32 KB)
+**Parser iNES (header 16 bytes):**
+- Valida magic `NES\x1A`
+- Lê PRG-ROM (byte 4 × 16 KB) e CHR-ROM (byte 5 × 8 KB)
+- Extrai mapper = `(flags7 & 0xF0) | (flags6 >> 4)`
+- Lê mirroring (horizontal / vertical / four-screen) — `Mirroring` é `Copy`
+- Desconta trainer opcional (512 bytes, bit 2 do flags6)
+- Aceita Mapper 0 e Mapper 1; retorna `Err` para outros
+- Aloca `chr_ram: Vec<u8>` de 8 KB quando `chr_size == 0` (CHR-RAM)
 - **Validado: nestest.nes carrega, reset vector 0xC004 lido corretamente ✅**
+
+**Mapper 0 (NROM):**
+- `read_prg` usa `addr % prg_rom.len()` — cobre NROM-128 (16 KB, espelhado) e NROM-256 (32 KB)
+
+**Mapper 1 (MMC1):**
+
+Estado interno na struct `Cartridge`: `mmc1_shift` (5 bits), `mmc1_shift_count`, `mmc1_control`, `mmc1_chr0`, `mmc1_chr1`, `mmc1_prg`.
+
+`write_prg(addr, value)` — shift register serial:
+- Bit 7 setado: reset (`shift=0`, `count=0`, `control |= 0x0C`)
+- Acumula 5 bits LSB; ao completar, despacha pelo endereço:
+  - `0x8000–0x9FFF`: `mmc1_control` → atualiza `mirroring` (SingleScreenLow/High/Vertical/Horizontal)
+  - `0xA000–0xBFFF`: `mmc1_chr0`
+  - `0xC000–0xDFFF`: `mmc1_chr1`
+  - `0xE000–0xFFFF`: `mmc1_prg` (bits 0–3)
+
+`read_prg` (PRG bank switching via `mmc1_control` bits 2–3):
+| Mode | Lo (0x8000–0xBFFF) | Hi (0xC000–0xFFFF) |
+|------|--------------------|--------------------|
+| 0/1  | `mmc1_prg & 0xFE`  | `mmc1_prg \| 0x01` (32 KB) |
+| 2    | fixo no banco 0    | `mmc1_prg`         |
+| 3    | `mmc1_prg`         | fixo no último banco |
+
+`read_chr` / `write_chr` (CHR bank switching via `mmc1_control` bit 4):
+- CHR-RAM: usado quando `chr_rom.is_empty()`
+- Modo 8 KB (`chr_mode=0`): `bank = mmc1_chr0 & 0xFE`, mapeado em 0x0000–0x1FFF
+- Modo 4 KB (`chr_mode=1`): `mmc1_chr0` → 0x0000–0x0FFF, `mmc1_chr1` → 0x1000–0x1FFF
+
+**`Mirroring` enum** — 5 variantes:
+```rust
+Horizontal, Vertical, FourScreen, SingleScreenLow, SingleScreenHigh
+```
 
 ### ✅ PPU (`src/ppu.rs`) — COMPLETA (background + sprites + scroll)
 
@@ -133,7 +166,9 @@ Mapeamento de memória real do NES:
 - `palette: [u8; 32]` — paleta interna
 - `oam: [u8; 256]` — 64 sprites × 4 bytes (Y, tile, attrs, X)
 - `chr_rom: Vec<u8>` — cópia do CHR-ROM do cartucho (evita conflitos de borrow)
-- `mirroring: Mirroring` — copiado do cartucho no `load_rom`
+- `chr_ram: Vec<u8>` — 8 KB de CHR-RAM (usado quando `chr_rom` está vazio)
+- `mirroring: Mirroring` — copiado/sincronizado do cartucho
+- `mapper: u8`, `mmc1_chr0: u8`, `mmc1_chr1: u8`, `mmc1_control: u8` — estado MMC1 sincronizado do `Cartridge` pelo `Bus` a cada escrita em 0x8000–0xFFFF
 - `framebuffer: Vec<u8>` — 256 × 240 × 3 bytes RGB
 
 **Timing** (262 scanlines × 341 ciclos):
@@ -178,13 +213,15 @@ Mapeamento de memória real do NES:
 - Bit 6 do PPUSTATUS setado quando sprite 0 tem pixel opaco na scanline atual
 - Limpo na scanline 261 (pré-render), junto com VBlank e Sprite Overflow
 
-**Memória PPU** (`ppu_read`):
+**Memória PPU** (`ppu_read` / `write_register` PPUDATA):
 
-| Range         | Fonte                                |
-|---------------|--------------------------------------|
-| 0x0000–0x1FFF | CHR-ROM (pattern tables)             |
-| 0x2000–0x3EFF | VRAM com mirroring H/V/FourScreen    |
-| 0x3F00–0x3FFF | Palette RAM (32 bytes, espelhada)    |
+| Range         | Fonte                                                          |
+|---------------|----------------------------------------------------------------|
+| 0x0000–0x1FFF | CHR-ROM com bank switching MMC1, ou CHR-RAM se rom vazia       |
+| 0x2000–0x3EFF | VRAM com mirroring H/V/FourScreen/SingleScreenLow/High         |
+| 0x3F00–0x3FFF | Palette RAM (32 bytes, espelhada)                              |
+
+- Escritas via PPUDATA (0x2007) para 0x0000–0x1FFF gravam em `chr_ram` quando disponível
 
 **Paleta:** tabela fixa `NES_PALETTE: [(u8,u8,u8); 64]` com as 64 cores NTSC do NES.
 
@@ -256,7 +293,7 @@ Mapeamento de memória real do NES:
 from nes_core import Nes
 
 nes = Nes()                    # construtor vazio (para testes unitários)
-nes.load_rom("roms/rom.nes")   # carrega ROM, copia CHR-ROM/mirroring para PPU, faz reset
+nes.load_rom("roms/rom.nes")   # carrega ROM (mapper 0 ou 1), copia CHR-ROM/RAM + estado MMC1 para PPU, faz reset
 
 nes.reset()                    # re-executa o reset vector
 nes.step()                     # executa 1 instrução + 3 ciclos PPU/ciclo + verifica NMI
@@ -279,7 +316,7 @@ nes.set_input(buttons: u8)        # atualiza estado do controle 1 (bitmask, ver 
 nes.get_audio_samples()           # -> Vec<f32>  (~733 amostras por frame a 44100 Hz; esvazia o buffer)
 ```
 
-> **Próximo passo:** suporte a mappers adicionais (MMC1, UxROM, etc.).
+> **Próximo passo:** suporte a mappers adicionais (UxROM/Mapper 2, MMC3/Mapper 4, etc.).
 
 ---
 
@@ -315,9 +352,11 @@ Estado inicial após reset: `status = 0x24` (U e I setados).
 | RESET   | 0xFFFC / 0xFFFD |
 | IRQ/BRK | 0xFFFE / 0xFFFF |
 
-### PPU — Decisão de Design: CHR-ROM na PPU
+### PPU — Decisão de Design: CHR na PPU + Sincronização MMC1
 
-A PPU armazena uma cópia do `chr_rom` e `mirroring` do cartucho internamente. Isso evita conflito de borrow no Rust: `Bus::ppu.tick()` precisa de acesso mutável à PPU ao mesmo tempo que poderia precisar ler `Bus::cartridge`. Copiando no `load_rom`, as referências ficam independentes.
+A PPU armazena cópias de `chr_rom`, `chr_ram` e `mirroring` do cartucho internamente. Isso evita conflito de borrow no Rust: `Bus::ppu.tick()` precisa de acesso mutável à PPU ao mesmo tempo que poderia precisar ler `Bus::cartridge`.
+
+Para o MMC1, o estado de bank switching CHR (`mmc1_chr0`, `mmc1_chr1`, `mmc1_control`) é armazenado tanto no `Cartridge` quanto na `Ppu`. O `Bus::write` usa variáveis locais para extrair o estado atualizado do cartucho e copiá-lo para a PPU após cada escrita em 0x8000–0xFFFF, mantendo os dois em sincronia sem conflito de borrow.
 
 ### Cartridge — iNES Header
 
