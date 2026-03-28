@@ -122,32 +122,32 @@ Mapeamento de memória real do NES:
 - `read_prg` usa `addr % prg_rom.len()` — cobre NROM-128 (16 KB, espelhado) e NROM-256 (32 KB)
 - **Validado: nestest.nes carrega, reset vector 0xC004 lido corretamente ✅**
 
-### ✅ PPU (`src/ppu.rs`) — BÁSICA IMPLEMENTADA
+### ✅ PPU (`src/ppu.rs`) — COMPLETA (background + sprites + scroll)
 
 **Struct `Ppu`** — campos principais:
 - `vram: [u8; 2048]` — nametables
 - `palette: [u8; 32]` — paleta interna
-- `oam: [u8; 256]` — sprites (reservado para depois)
+- `oam: [u8; 256]` — 64 sprites × 4 bytes (Y, tile, attrs, X)
 - `chr_rom: Vec<u8>` — cópia do CHR-ROM do cartucho (evita conflitos de borrow)
 - `mirroring: Mirroring` — copiado do cartucho no `load_rom`
 - `framebuffer: Vec<u8>` — 256 × 240 × 3 bytes RGB
 
 **Timing** (262 scanlines × 341 ciclos):
 
-| Scanline  | Função                                                       |
-|-----------|--------------------------------------------------------------|
-| 0–239     | Visível — `render_background()` ao final de cada linha       |
-| 240       | Pós-render (idle)                                            |
+| Scanline  | Função                                                                      |
+|-----------|-----------------------------------------------------------------------------|
+| 0–239     | Visível — `render_background()` + `render_sprites()` ao ciclo 257           |
+| 240       | Pós-render (idle)                                                           |
 | 241       | Início do VBlank: seta bit 7 de PPUSTATUS, dispara NMI se PPUCTRL bit 7 = 1 |
-| 242–260   | VBlank                                                       |
-| 261       | Pré-render: limpa VBlank, Sprite 0 Hit, Sprite Overflow      |
+| 242–260   | VBlank                                                                      |
+| 261       | Pré-render: limpa VBlank, Sprite 0 Hit, Sprite Overflow                     |
 
 **Registradores implementados:**
 
 | Addr   | Reg        | Leitura              | Escrita                          |
 |--------|------------|----------------------|----------------------------------|
 | 0x2000 | PPUCTRL    | —                    | ctrl = value                     |
-| 0x2001 | PPUMASK    | —                    | mask = value                     |
+| 0x2001 | PPUMASK    | —                    | mask = value (bit3=BG, bit4=SPR) |
 | 0x2002 | PPUSTATUS  | retorna + limpa VBlank e latches | —                   |
 | 0x2003 | OAMADDR    | —                    | oam_addr = value                 |
 | 0x2004 | OAMDATA    | oam[oam_addr]        | oam[oam_addr++] = value          |
@@ -155,10 +155,24 @@ Mapeamento de memória real do NES:
 | 0x2006 | PPUADDR    | —                    | vram_addr hi/lo (toggle)         |
 | 0x2007 | PPUDATA    | buffered + inc addr  | escreve VRAM/paleta + inc addr   |
 
-**Renderização de background** (`render_background`):
-1. Aplica scroll_y → seleciona linha e tile row
-2. Para cada coluna (0–31): lê nametable, atributo, bytes de pattern table (plano 0 e 1)
-3. 8 pixels por tile → índice de cor → paleta → `NES_PALETTE[cor & 0x3F]` → RGB no framebuffer
+**Renderização de background** (`render_background`) — pixel-a-pixel com scroll completo:
+- Loop em `0..256 pixels` por scanline (antes era tile-a-tile)
+- `x = pixel_x + scroll_x`, `y = scanline + scroll_y`
+- Nametable selecionada por `nt_x = (coarse_x/32 ^ ctrl_nt_x) & 1` e `nt_y` análogo — suporta scroll contínuo entre as 4 nametables com wrap correto
+- Atributo de paleta: `base_nt + 0x3C0 + attr_y*8 + attr_x`
+
+**Renderização de sprites** (`render_sprites`) — novo:
+- Itera OAM de 63→0 (reverso = sprite 0 sobrescreve em empate, prioridade correta)
+- Cada sprite: Y, tile, atributos (flip H/V, paleta, prioridade vs BG), X
+- Pattern table de sprite: bit 3 de PPUCTRL (`$0000` ou `$1000`)
+- Paleta de sprite: `0x3F10 + paleta×4 + cor`
+- Flip vertical: `row = 7 - row`; flip horizontal: inverte bit de leitura
+- Pixels transparentes (color\_idx == 0) ignorados
+- Sprites com `behind_bg = true` (bit 5 de attrs) não são desenhados sobre o BG
+
+**Sprite 0 Hit:**
+- Bit 6 do PPUSTATUS setado quando sprite 0 tem pixel opaco na scanline atual
+- Limpo na scanline 261 (pré-render), junto com VBlank e Sprite Overflow
 
 **Memória PPU** (`ppu_read`):
 
@@ -170,7 +184,22 @@ Mapeamento de memória real do NES:
 
 **Paleta:** tabela fixa `NES_PALETTE: [(u8,u8,u8); 64]` com as 64 cores NTSC do NES.
 
-### ⬜ Input — PRÓXIMA ETAPA
+### ✅ Input (`src/bus.rs` + `src/lib.rs` + `main.py`) — IMPLEMENTADO
+
+- **Protocolo serial NES:** strobe em 0x4016 trava o estado em `controller1_shift`; cada leitura de 0x4016 devolve 1 bit na ordem A→B→Select→Start→Up→Down→Left→Right
+- **`set_input(buttons: u8)`** exposto via PyO3 — Python passa bitmask a cada frame
+- **Mapeamento de teclas** (`main.py`): Z=A, X=B, RShift=Select, Enter=Start, setas=direcionais
+
+| Bit | Botão  | Tecla  |
+|-----|--------|--------|
+| 7   | A      | Z      |
+| 6   | B      | X      |
+| 5   | Select | RShift |
+| 4   | Start  | Enter  |
+| 3   | Up     | ↑      |
+| 2   | Down   | ↓      |
+| 1   | Left   | ←      |
+| 0   | Right  | →      |
 
 ### ⬜ APU (`src/apu.rs`) — FUTURA
 
@@ -201,9 +230,10 @@ nes.get_cycles()  # -> u64
 nes.mem_read(addr: u16)           # -> u8  (lê da memória mapeada, &mut — tem side effects)
 nes.mem_write(addr: u16, val: u8) # escreve na memória mapeada
 nes.set_pc(addr: u16)             # força PC (usado pelo nestest.py)
+nes.set_input(buttons: u8)        # atualiza estado do controle 1 (bitmask, ver tabela de botões)
 ```
 
-> **Próximo passo da API:** adicionar `set_input(u8)` quando o controlador estiver implementado.
+> **Próximo passo:** APU para áudio.
 
 ---
 
