@@ -7,7 +7,7 @@ Emulador do Nintendo Entertainment System (NES) com arquitetura híbrida:
 - **Python** cuida do frontend: janela, input do usuário e rendering via Pygame.
 - **Bridge** entre os dois via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/), gerando uma biblioteca `.so` importável pelo Python.
 
-O objetivo é ter um emulador funcional capaz de rodar ROMs NES reais, com suporte aos mappers 0 (NROM), 1 (MMC1) e 2 (UxROM).
+O objetivo é ter um emulador funcional capaz de rodar ROMs NES reais, com suporte aos mappers 0 (NROM), 1 (MMC1), 2 (UxROM) e 3 (CNROM).
 
 ---
 
@@ -42,12 +42,12 @@ nes-emulator/
     ├── lib.rs          # Bridge PyO3 — expõe struct Nes ao Python
     ├── cpu.rs          # CPU MOS 6502 (completa: oficiais + ilegais)
     ├── bus.rs          # Barramento de memória com mapa do NES
-    ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM) + Mapper 1 (MMC1) + Mapper 2 (UxROM)
+    ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM) + Mapper 1 (MMC1) + Mapper 2 (UxROM) + Mapper 3 (CNROM)
     ├── ppu.rs          # PPU: rendering de background, VBlank, NMI
     └── apu.rs          # APU: Pulse 1, Pulse 2, Triangle, Noise
 ```
 
-> **Estado atual:** CPU, Bus, Cartridge (Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM), PPU, Input e APU implementados.
+> **Estado atual:** CPU, Bus, Cartridge (Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM + Mapper 3/CNROM), PPU, Input e APU implementados.
 > O pipeline completo funciona: `step_frame()` roda um frame inteiro, `get_framebuffer()` retorna o buffer RGB e `get_audio_samples()` retorna amostras f32 para o Pygame.
 > Próxima etapa: suporte a mappers adicionais (MMC3/Mapper 4, etc.).
 
@@ -117,7 +117,7 @@ Mapeamento de memória real do NES:
 - OAM DMA lê diretamente de `self.ram` (evita recursão em `self.read`)
 - Escritas em 0x8000–0xFFFF chamam `cart.write_prg()` e sincronizam o estado MMC1 (`mmc1_chr0/chr1/control/mirroring`) para a PPU via variáveis locais (evita conflito de borrow entre `self.cartridge` e `self.ppu`)
 
-### ✅ Cartridge + Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM (`src/cartridge.rs`) — IMPLEMENTADO
+### ✅ Cartridge + Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM + Mapper 3/CNROM (`src/cartridge.rs`) — IMPLEMENTADO
 
 **Parser iNES (header 16 bytes):**
 - Valida magic `NES\x1A`
@@ -125,7 +125,7 @@ Mapeamento de memória real do NES:
 - Extrai mapper = `(flags7 & 0xF0) | (flags6 >> 4)`
 - Lê mirroring (horizontal / vertical / four-screen) — `Mirroring` é `Copy`
 - Desconta trainer opcional (512 bytes, bit 2 do flags6)
-- Aceita Mapper 0, Mapper 1 e Mapper 2; retorna `Err` para outros
+- Aceita Mapper 0, Mapper 1, Mapper 2 e Mapper 3; retorna `Err` para outros
 - Aloca `chr_ram: Vec<u8>` de 8 KB quando `chr_size == 0` (CHR-RAM)
 - **Validado: nestest.nes carrega, reset vector 0xC004 lido corretamente ✅**
 
@@ -176,6 +176,18 @@ Estado interno na struct `Cartridge`: `uxrom_prg_bank: u8` (banco selecionável,
 `read_chr`: CHR fixo em 8 KB — compartilha o mesmo arm do Mapper 0 (`0 | 2 =>`). Usa `chr_rom[addr & 0x1FFF]` se disponível, senão `chr_ram` (CHR-RAM de 8 KB alocada no load).
 
 Jogos notáveis que usam UxROM: Mega Man, Contra, Castlevania, DuckTales.
+
+**Mapper 3 (CNROM):**
+
+Estado interno na struct `Cartridge`: `cnrom_chr_bank: u8` (banco CHR selecionado, inicializado em 0).
+
+`write_prg(addr, value)` — qualquer escrita em 0x8000–0xFFFF armazena `value % chr_banks` em `cnrom_chr_bank`. O módulo evita índice fora dos limites em ROMs com menos bancos do que o valor escrito.
+
+`read_prg`: PRG fixo — compartilha o arm `0 | 3` com o Mapper 0 (`addr % prg_rom.len()`), cobrindo 16 KB espelhado e 32 KB.
+
+`read_chr`: arm dedicado `3` — `offset = cnrom_chr_bank * 0x2000 + (addr & 0x1FFF)`. Usa `.get().unwrap_or(0)` para segurança.
+
+Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps).
 
 ### ✅ PPU (`src/ppu.rs`) — COMPLETA (background + sprites + scroll)
 

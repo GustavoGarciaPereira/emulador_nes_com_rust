@@ -22,6 +22,8 @@ pub struct Cartridge {
     pub mmc1_prg: u8,             // PRG bank selecionado
     // UxROM (Mapper 2) state
     pub uxrom_prg_bank: u8,       // banco selecionável (0x8000–0xBFFF)
+    // CNROM (Mapper 3) state
+    pub cnrom_chr_bank: u8,       // banco CHR selecionado (8 KB por banco)
 }
 
 impl Cartridge {
@@ -43,9 +45,9 @@ impl Cartridge {
 
         // Mapper = nibble alto do byte 7 | nibble alto do byte 6
         let mapper = (flags7 & 0xF0) | (flags6 >> 4);
-        if mapper != 0 && mapper != 1 && mapper != 2 {
+        if mapper != 0 && mapper != 1 && mapper != 2 && mapper != 3 {
             return Err(format!(
-                "Mapper {} não suportado — apenas Mapper 0 (NROM), Mapper 1 (MMC1) e Mapper 2 (UxROM) estão implementados",
+                "Mapper {} não suportado — apenas Mapper 0 (NROM), Mapper 1 (MMC1), Mapper 2 (UxROM) e Mapper 3 (CNROM) estão implementados",
                 mapper
             ));
         }
@@ -90,6 +92,7 @@ impl Cartridge {
             mmc1_chr1: 0,
             mmc1_prg: 0,
             uxrom_prg_bank: 0,
+            cnrom_chr_bank: 0,
         })
     }
 
@@ -99,8 +102,8 @@ impl Cartridge {
             return 0;
         }
         match self.mapper {
-            0 => {
-                // NROM: módulo para lidar corretamente com 16 KB (espelhado) e 32 KB
+            0 | 3 => {
+                // NROM / CNROM: PRG fixo — módulo cobre 16 KB espelhado e 32 KB
                 self.prg_rom[addr as usize % self.prg_rom.len()]
             }
             1 => {
@@ -141,6 +144,13 @@ impl Cartridge {
 
     /// Processa uma escrita em 0x8000–0xFFFF (mapper register).
     pub fn write_prg(&mut self, addr: u16, value: u8) {
+        // CNROM: qualquer escrita em 0x8000–0xFFFF seleciona o banco CHR de 8 KB
+        if self.mapper == 3 {
+            let chr_banks = (self.chr_rom.len() / 0x2000).max(1) as u8;
+            self.cnrom_chr_bank = value % chr_banks;
+            return;
+        }
+
         // UxROM: qualquer escrita em 0x8000–0xFFFF seleciona o banco PRG-LO
         if self.mapper == 2 {
             self.uxrom_prg_bank = value;
@@ -193,6 +203,11 @@ impl Cartridge {
                 } else {
                     self.chr_rom[addr as usize & 0x1FFF]
                 }
+            }
+            3 => {
+                // CNROM: banco CHR de 8 KB selecionável via cnrom_chr_bank
+                let offset = self.cnrom_chr_bank as usize * 0x2000 + (addr as usize & 0x1FFF);
+                self.chr_rom.get(offset).copied().unwrap_or(0)
             }
             1 => {
                 if self.chr_rom.is_empty() {

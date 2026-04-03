@@ -42,6 +42,7 @@ A Nintendo Entertainment System emulator written in **Rust** (core) + **Python**
 | **Mapper 0** | ✅ | NROM (16 KB espelhado e 32 KB) |
 | **Mapper 1** | ✅ | MMC1 — PRG/CHR bank switching 4 modos, CHR-RAM, mirroring dinâmico |
 | **Mapper 2** | ✅ | UxROM — PRG bank switching 16 KB (lo selecionável, hi fixo no último banco), CHR fixo ou CHR-RAM |
+| **Mapper 3** | ✅ | CNROM — PRG fixo, CHR bank switching 8 KB (até 4 bancos de 8 KB) |
 | **Frontend** | ✅ | Pygame, escala 3×, 60.098 fps (NTSC exato via `tick_busy_loop`), áudio 44100 Hz estéreo com backpressure |
 | **Bridge** | ✅ | PyO3 + maturin — módulo `.so` importável pelo Python |
 
@@ -64,6 +65,9 @@ Testados e funcionando:
 | Contra | Mapper 2 (UxROM) |
 | Castlevania | Mapper 2 (UxROM) |
 | DuckTales | Mapper 2 (UxROM) |
+| Donkey Kong (alguns dumps) | Mapper 3 (CNROM) |
+| Q*bert | Mapper 3 (CNROM) |
+| Gradius | Mapper 3 (CNROM) |
 
 > ROMs proprietárias não estão incluídas no repositório. Use apenas ROMs que você possui legalmente.
 
@@ -151,6 +155,7 @@ O emulador usa uma arquitetura híbrida: o core de hardware roda em Rust para m�
 │                    │  Mapper 0 NROM  │                       │
 │                    │  Mapper 1 MMC1  │                       │
 │                    │  Mapper 2 UxROM │                       │
+│                    │  Mapper 3 CNROM │                       │
 │                    └─────────────────┘                       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -164,13 +169,14 @@ O emulador usa uma arquitetura híbrida: o core de hardware roda em Rust para m�
 | `bus.rs` | Barramento de memória, mapa de endereços |
 | `ppu.rs` | PPU — rendering, VBlank, NMI |
 | `apu.rs` | APU — síntese de áudio |
-| `cartridge.rs` | Parser iNES, Mapper 0, Mapper 1/MMC1, Mapper 2/UxROM |
+| `cartridge.rs` | Parser iNES, Mapper 0, Mapper 1/MMC1, Mapper 2/UxROM, Mapper 3/CNROM |
 
 ---
 
 ## 🗺️ Roadmap
 
 - [x] **Mapper 2** (UxROM) — Mega Man, Castlevania, Contra, DuckTales
+- [x] **Mapper 3** (CNROM) — Q*bert, Gradius, Donkey Kong (alguns dumps)
 - [ ] **Mapper 4** (MMC3) — Super Mario Bros 3, Mega Man 3–6
 - [ ] **APU DMC** — canal de sample delta (PCM)
 - [ ] **Save States** — salvar e carregar estado completo
