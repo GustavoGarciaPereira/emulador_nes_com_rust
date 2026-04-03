@@ -59,14 +59,14 @@ nes-emulator/
 # Ativar o ambiente virtual Python
 source venv/bin/activate
 
-# Compilar o módulo Rust e instalar no venv (fazer após qualquer mudança em Rust)
-maturin develop
+# Compilar o módulo Rust e instalar no venv (SEMPRE usar --release)
+maturin develop --release
 
 # Rodar o emulador com uma ROM
 python main.py roms/jogo.nes
 
-# Compilar em modo release (para medir performance real)
-maturin develop --release
+# Rodar com diagnóstico detalhado no terminal (FPS, core, render, audio µs)
+python main.py roms/jogo.nes --diag
 
 # Validar a CPU contra o log de referência (8991 instruções)
 python tools/nestest.py
@@ -74,6 +74,8 @@ python tools/nestest.py
 # Testar carregamento de ROM via load_rom()
 python tools/test_cartridge.py
 ```
+
+> **IMPORTANTE:** Nunca usar `maturin develop` sem `--release`. O modo debug desativa todas as otimizações LLVM — o core foi medido em ~15 ms/frame no modo debug vs ~1–2 ms/frame em release (diferença de 8–15×).
 
 ---
 
@@ -194,11 +196,12 @@ Horizontal, Vertical, FourScreen, SingleScreenLow, SingleScreenHigh
 | 0x2006 | PPUADDR    | —                    | vram_addr hi/lo (toggle)         |
 | 0x2007 | PPUDATA    | buffered + inc addr  | escreve VRAM/paleta + inc addr   |
 
-**Renderização de background** (`render_background`) — pixel-a-pixel com scroll completo:
-- Loop em `0..256 pixels` por scanline (antes era tile-a-tile)
+**Renderização de background** (`render_background`) — pixel-a-pixel com scroll completo e cache de tile:
+- Loop em `0..256 pixels` por scanline
 - `x = pixel_x + scroll_x`, `y = scanline + scroll_y`
 - Nametable selecionada por `nt_x = (coarse_x/32 ^ ctrl_nt_x) & 1` e `nt_y` análogo — suporta scroll contínuo entre as 4 nametables com wrap correto
 - Atributo de paleta: `base_nt + 0x3C0 + attr_y*8 + attr_x`
+- **Otimização de cache por tile:** termos que dependem só de `y` (coarse_y, fine_y, nt_y, attr_y, nt_row) são calculados 1×/scanline. Dados do tile (tile_idx, palette_idx, pattern_lo/hi, tile_colors[4]) são recalculados apenas quando `coarse_x` muda (a cada 8 pixels). No loop interno de pixel, zero chamadas a `ppu_read`. Resultado: ~245.760 → ~31.680 chamadas `ppu_read`/frame (**≈ 8× menos**).
 
 **Renderização de sprites** (`render_sprites`) — novo:
 - Itera OAM de 63→0 (reverso = sprite 0 sobrescreve em empate, prioridade correta)
@@ -282,7 +285,12 @@ Horizontal, Vertical, FourScreen, SingleScreenLow, SingleScreenHigh
 
 **Frontend (main.py):**
 - `pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)`
-- `play_audio`: converte f32 → int16 → stereo com `np.column_stack` → `pygame.sndarray.make_sound` → `sound.play()`
+- Canal de áudio dedicado (`pygame.mixer.Channel(0)`) com estratégia de backpressure:
+  - Canal livre → `channel.play(sound)` (toca imediatamente)
+  - Canal ocupado, fila vazia → `channel.queue(sound)` (enfileira próximo)
+  - Canal ocupado, fila cheia → descarta o frame de áudio (previne acúmulo)
+- Cap de amostras: `SAMPLES_PER_FRAME = round(44100 / 60.098) = 734` — excesso descartado antes de criar o Sound
+- `play_audio`: converte f32 → int16 → stereo com `np.column_stack` → `pygame.sndarray.make_sound`
 - Dependência: `numpy` (instalada no venv)
 
 ---
@@ -298,6 +306,7 @@ nes.load_rom("roms/rom.nes")   # carrega ROM (mapper 0 ou 1), copia CHR-ROM/RAM 
 nes.reset()                    # re-executa o reset vector
 nes.step()                     # executa 1 instrução + 3 ciclos PPU/ciclo + verifica NMI
 nes.step_frame()               # executa instruções até completar um frame inteiro
+nes.step_frame_timed()         # igual a step_frame(), mas retorna tempo de execução em µs (u64)
 
 nes.get_framebuffer()  # -> Vec<u8>  (256 * 240 * 3 bytes RGB)
 
@@ -313,7 +322,7 @@ nes.mem_read(addr: u16)           # -> u8  (lê da memória mapeada, &mut — te
 nes.mem_write(addr: u16, val: u8) # escreve na memória mapeada
 nes.set_pc(addr: u16)             # força PC (usado pelo nestest.py)
 nes.set_input(buttons: u8)        # atualiza estado do controle 1 (bitmask, ver tabela de botões)
-nes.get_audio_samples()           # -> Vec<f32>  (~733 amostras por frame a 44100 Hz; esvazia o buffer)
+nes.get_audio_samples()           # -> Vec<f32>  (~734 amostras por frame a 44100 Hz; esvazia o buffer)
 ```
 
 > **Próximo passo:** suporte a mappers adicionais (UxROM/Mapper 2, MMC3/Mapper 4, etc.).
@@ -378,6 +387,43 @@ Bytes 8-15: Padding / extended flags
 - **Entrada manual para validação:** `0xC000` (usada pelo `tools/nestest.py` via `set_pc`)
 - O `nestest.log` começa em `0xC000` — por isso o `nestest.py` força `PC=0xC000`
 - `nestest.py` usa `load_rom()` para carregar a ROM (não escreve bytes manualmente)
+
+---
+
+## Performance & Diagnóstico
+
+### Números de referência (maturin develop --release, hardware moderno)
+
+| Métrica | Valor esperado |
+|---|---|
+| `core` (step_frame_timed) | 1.000–3.000 µs |
+| `render` (frombuffer→scale→flip) | 1.500–4.000 µs |
+| `audio` (make_sound + queue) | < 500 µs |
+| FPS real | 59–61 |
+
+### Sincronização de tempo
+
+O loop principal usa `clock.tick_busy_loop(60.098)` — busy-wait de alta precisão que não "dorme demais" como `tick()` (`SDL_Delay` tem granularidade de ±4 ms). O alvo é 60.098 fps, que corresponde à frequência exata do NES NTSC.
+
+### Pipeline de render Pygame
+
+```python
+# .convert() converte a Surface imediatamente para o pixel-format do display
+# (sem isso, scale/blit fazem conversão implícita a cada frame)
+tmp = pygame.image.frombuffer(buf, (256, 240), "RGB").convert()
+# Terceiro argumento = surface de destino → sem alocar Surface intermediária
+pygame.transform.scale(tmp, (WIN_W, WIN_H), screen)
+```
+
+### Diagnóstico em tempo real
+
+- **Título da janela:** exibe FPS, core µs, render µs, audio µs e profundidade da fila de áudio a cada segundo — sempre ativo.
+- **Flag `--diag`:** `python main.py rom.nes --diag` imprime o mesmo no terminal a cada segundo.
+- **`step_frame_timed()`** em `src/lib.rs`: método PyO3 que mede o tempo do loop principal em Rust com `std::time::Instant`, retorna `u64` em microssegundos. Útil para isolar se o gargalo é no core Rust ou no frontend Python.
+
+### Backpressure de áudio
+
+Com `tick_busy_loop` na frequência correta o canal de áudio quase nunca entra em drop. Se `queue=1` aparecer consistentemente no título, indica que o emulador está ligeiramente acima de 60 fps — verificar se `TARGET_FPS = 60.098` está sendo respeitado.
 
 ---
 

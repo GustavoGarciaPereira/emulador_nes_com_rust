@@ -41,7 +41,7 @@ A Nintendo Entertainment System emulator written in **Rust** (core) + **Python**
 | **Input** | ✅ Implementado | Protocolo serial NES, mapeamento completo de teclado |
 | **Mapper 0** | ✅ | NROM (16 KB espelhado e 32 KB) |
 | **Mapper 1** | ✅ | MMC1 — PRG/CHR bank switching 4 modos, CHR-RAM, mirroring dinâmico |
-| **Frontend** | ✅ | Pygame, escala 3×, ~60 fps, áudio 44100 Hz estéreo |
+| **Frontend** | ✅ | Pygame, escala 3×, 60.098 fps (NTSC exato via `tick_busy_loop`), áudio 44100 Hz estéreo com backpressure |
 | **Bridge** | ✅ | PyO3 + maturin — módulo `.so` importável pelo Python |
 
 ---
@@ -89,18 +89,14 @@ source venv/bin/activate          # Linux/macOS
 # 3. Instale as dependências Python
 pip install maturin pygame numpy
 
-# 4. Compile o core Rust e instale no venv
-maturin develop
+# 4. Compile o core Rust em modo release e instale no venv
+maturin develop --release
 
 # 5. Execute com uma ROM
 python main.py roms/jogo.nes
-```
 
-Para máxima performance, compile em modo release:
-
-```bash
-maturin develop --release
-python main.py roms/jogo.nes
+# (opcional) exibe FPS, core µs, render µs e estado do áudio no terminal
+python main.py roms/jogo.nes --diag
 ```
 
 ---
