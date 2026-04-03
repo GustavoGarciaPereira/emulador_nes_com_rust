@@ -93,15 +93,16 @@ impl Bus {
                 // entre self.cartridge e self.ppu
                 let sync = if let Some(cart) = &mut self.cartridge {
                     cart.write_prg(addr, value);
-                    Some((cart.mmc1_chr0, cart.mmc1_chr1, cart.mmc1_control, cart.mirroring))
+                    Some((cart.mmc1_chr0, cart.mmc1_chr1, cart.mmc1_control, cart.mirroring, cart.cnrom_chr_bank))
                 } else {
                     None
                 };
-                if let Some((chr0, chr1, control, mirroring)) = sync {
+                if let Some((chr0, chr1, control, mirroring, cnrom_bank)) = sync {
                     self.ppu.mmc1_chr0 = chr0;
                     self.ppu.mmc1_chr1 = chr1;
                     self.ppu.mmc1_control = control;
                     self.ppu.mirroring = mirroring;
+                    self.ppu.cnrom_chr_bank = cnrom_bank;
                 }
             }
         }

@@ -68,6 +68,7 @@ Testados e funcionando:
 | Donkey Kong (alguns dumps) | Mapper 3 (CNROM) |
 | Q*bert | Mapper 3 (CNROM) |
 | Gradius | Mapper 3 (CNROM) |
+| Adventure Island | Mapper 3 (CNROM) |
 
 > ROMs proprietárias não estão incluídas no repositório. Use apenas ROMs que você possui legalmente.
 

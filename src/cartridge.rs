@@ -145,9 +145,12 @@ impl Cartridge {
     /// Processa uma escrita em 0x8000–0xFFFF (mapper register).
     pub fn write_prg(&mut self, addr: u16, value: u8) {
         // CNROM: qualquer escrita em 0x8000–0xFFFF seleciona o banco CHR de 8 KB
+        // Bus conflict: o valor efetivo é value AND o byte da PRG-ROM no endereço escrito
         if self.mapper == 3 {
             let chr_banks = (self.chr_rom.len() / 0x2000).max(1) as u8;
-            self.cnrom_chr_bank = value % chr_banks;
+            let prg_offset = (addr as usize - 0x8000) % self.prg_rom.len();
+            let rom_val = self.prg_rom.get(prg_offset).copied().unwrap_or(0xFF);
+            self.cnrom_chr_bank = (value & rom_val) % chr_banks;
             return;
         }
 

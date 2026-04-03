@@ -22,11 +22,12 @@ pub struct Ppu {
     pub chr_ram: Vec<u8>,       // 8 KB — usado quando chr_rom está vazio (CHR-RAM)
     pub mirroring: Mirroring,
 
-    // Estado MMC1 para bank switching de CHR (sincronizado do Cartridge pelo Bus)
+    // Estado de bank switching CHR (sincronizado do Cartridge pelo Bus)
     pub mapper: u8,
     pub mmc1_chr0: u8,
     pub mmc1_chr1: u8,
     pub mmc1_control: u8,
+    pub cnrom_chr_bank: u8,
 
     // Registradores
     pub ctrl: u8,               // 0x2000
@@ -63,6 +64,7 @@ impl Ppu {
             mmc1_chr0: 0,
             mmc1_chr1: 0,
             mmc1_control: 0x0C,
+            cnrom_chr_bank: 0,
             ctrl: 0,
             mask: 0,
             status: 0,
@@ -380,6 +382,10 @@ impl Ppu {
                             self.chr_rom.get(offset % self.chr_rom.len()).copied().unwrap_or(0)
                         }
                     }
+                } else if self.mapper == 3 {
+                    // CNROM: banco CHR de 8 KB selecionável
+                    let offset = self.cnrom_chr_bank as usize * 0x2000 + (addr as usize & 0x1FFF);
+                    self.chr_rom.get(offset).copied().unwrap_or(0)
                 } else {
                     self.chr_rom[addr as usize % self.chr_rom.len()]
                 }

@@ -115,7 +115,7 @@ Mapeamento de memória real do NES:
 - `Bus::read` é `&mut self` (registradores PPU têm side effects na leitura)
 - `Bus` possui `pub ppu: Ppu`, `pub apu: Apu`, `controller1`, `controller1_shift`, `controller_strobe`
 - OAM DMA lê diretamente de `self.ram` (evita recursão em `self.read`)
-- Escritas em 0x8000–0xFFFF chamam `cart.write_prg()` e sincronizam o estado MMC1 (`mmc1_chr0/chr1/control/mirroring`) para a PPU via variáveis locais (evita conflito de borrow entre `self.cartridge` e `self.ppu`)
+- Escritas em 0x8000–0xFFFF chamam `cart.write_prg()` e sincronizam o estado de bank switching (`mmc1_chr0/chr1/control/mirroring` + `cnrom_chr_bank`) para a PPU via variáveis locais (evita conflito de borrow entre `self.cartridge` e `self.ppu`)
 
 ### ✅ Cartridge + Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM + Mapper 3/CNROM (`src/cartridge.rs`) — IMPLEMENTADO
 
@@ -181,13 +181,20 @@ Jogos notáveis que usam UxROM: Mega Man, Contra, Castlevania, DuckTales.
 
 Estado interno na struct `Cartridge`: `cnrom_chr_bank: u8` (banco CHR selecionado, inicializado em 0).
 
-`write_prg(addr, value)` — qualquer escrita em 0x8000–0xFFFF armazena `value % chr_banks` em `cnrom_chr_bank`. O módulo evita índice fora dos limites em ROMs com menos bancos do que o valor escrito.
+`write_prg(addr, value)` — qualquer escrita em 0x8000–0xFFFF emula o **Bus Conflict** do hardware real:
+1. Lê o byte da PRG-ROM no offset correspondente: `prg_offset = (addr - 0x8000) % prg_rom.len()`
+2. Faz AND com o valor escrito pelo CPU: `final_value = value & rom_val`
+3. Seleciona o banco: `cnrom_chr_bank = final_value % chr_banks`
+
+O Bus Conflict existe porque no CNROM o barramento de dados é compartilhado entre o CPU (que escreve) e a PRG-ROM (que a CPU lê naquele endereço simultaneamente). O AND é o resultado físico dessa colisão. Jogos como Adventure Island dependem desse comportamento para trocar corretamente os bancos CHR; sem ele, o background fica corrompido (tiling magenta).
 
 `read_prg`: PRG fixo — compartilha o arm `0 | 3` com o Mapper 0 (`addr % prg_rom.len()`), cobrindo 16 KB espelhado e 32 KB.
 
 `read_chr`: arm dedicado `3` — `offset = cnrom_chr_bank * 0x2000 + (addr & 0x1FFF)`. Usa `.get().unwrap_or(0)` para segurança.
 
-Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps).
+**Sincronização PPU para CNROM:** a PPU possui campo `cnrom_chr_bank: u8` que é atualizado pelo `Bus::write` a cada escrita em 0x8000–0xFFFF (junto com o estado MMC1). O `ppu_read` para 0x0000–0x1FFF tem arm dedicado `mapper == 3` que usa esse campo para calcular o offset correto no `chr_rom` interno da PPU. Sem essa sincronização a PPU ignora o bank switching e sempre lê do banco 0.
+
+Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps), Adventure Island.
 
 ### ✅ PPU (`src/ppu.rs`) — COMPLETA (background + sprites + scroll)
 
@@ -199,6 +206,7 @@ Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps).
 - `chr_ram: Vec<u8>` — 8 KB de CHR-RAM (usado quando `chr_rom` está vazio)
 - `mirroring: Mirroring` — copiado/sincronizado do cartucho
 - `mapper: u8`, `mmc1_chr0: u8`, `mmc1_chr1: u8`, `mmc1_control: u8` — estado MMC1 sincronizado do `Cartridge` pelo `Bus` a cada escrita em 0x8000–0xFFFF
+- `cnrom_chr_bank: u8` — banco CHR selecionado para Mapper 3 (CNROM), sincronizado do `Cartridge` pelo `Bus` a cada escrita em 0x8000–0xFFFF
 - `framebuffer: Vec<u8>` — 256 × 240 × 3 bytes RGB
 
 **Timing** (262 scanlines × 341 ciclos):
