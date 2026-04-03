@@ -212,57 +212,80 @@ impl Ppu {
     /// Renderiza uma scanline completa de background no framebuffer (pixel-a-pixel com scroll).
     fn render_background(&mut self) {
         let scanline = self.scanline as u16;
-        // Pattern table do background: bit 4 de PPUCTRL
         let pt_base: u16 = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0x0000 };
+        let ctrl_nt_x = (self.ctrl as u16) & 0x01;
+        let ctrl_nt_y = ((self.ctrl as u16) >> 1) & 0x01;
+
+        // y é constante para a scanline inteira — hoist fora do loop de pixel
+        let y       = scanline + self.scroll_y as u16;
+        let coarse_y = y / 8;
+        let fine_y   = y % 8;
+        let nt_y     = ((coarse_y / 30) ^ ctrl_nt_y) & 1;
+        // Pré-computa termos do atributo que dependem só de y
+        let attr_y      = (coarse_y % 30) / 4;
+        let attr_shift_y = ((coarse_y % 4) / 2) * 2; // contribuição de y no shift do atributo
+        let nt_row      = (coarse_y % 30) * 32;       // linha dentro do nametable
+
+        // Cache por tile: dados recalculados a cada mudança de coarse_x (a cada 8 pixels)
+        let mut last_coarse_x = u16::MAX; // garante cache miss no primeiro pixel
+        let mut tile_colors   = [(0u8, 0u8, 0u8); 4]; // cores NES pré-resolvidas para os 4 índices
+        let mut pattern_lo    = 0u8;
+        let mut pattern_hi    = 0u8;
+
+        let fb_row = self.scanline as usize * 256;
 
         for pixel_x in 0u16..256 {
-            let x = pixel_x + self.scroll_x as u16;
-            let y = scanline + self.scroll_y as u16;
-
+            let x        = pixel_x + self.scroll_x as u16;
             let coarse_x = x / 8;
             let fine_x   = x % 8;
-            let coarse_y = y / 8;
-            let fine_y   = y % 8;
 
-            // Seleciona nametable com wrap, levando em conta PPUCTRL bits 0-1
-            let nt_x = ((coarse_x / 32) ^ (self.ctrl as u16 & 0x01)) & 1;
-            let nt_y = ((coarse_y / 30) ^ ((self.ctrl as u16 >> 1) & 0x01)) & 1;
-            let base_nt: u16 = match (nt_x, nt_y) {
-                (0, 0) => 0x2000,
-                (1, 0) => 0x2400,
-                (0, 1) => 0x2800,
-                _      => 0x2C00,
-            };
+            // Recalcula somente quando o tile muda (a cada 8 pixels)
+            if coarse_x != last_coarse_x {
+                last_coarse_x = coarse_x;
 
-            let nt_addr   = base_nt + (coarse_y % 30) * 32 + (coarse_x % 32);
-            let tile_idx  = self.ppu_read(nt_addr) as u16;
+                let nt_x   = ((coarse_x / 32) ^ ctrl_nt_x) & 1;
+                let base_nt: u16 = match (nt_x, nt_y) {
+                    (0, 0) => 0x2000,
+                    (1, 0) => 0x2400,
+                    (0, 1) => 0x2800,
+                    _      => 0x2C00,
+                };
 
-            // Atributo de paleta
-            let attr_x    = (coarse_x % 32) / 4;
-            let attr_y    = (coarse_y % 30) / 4;
-            let attr_addr = base_nt + 0x03C0 + attr_y * 8 + attr_x;
-            let attr_byte = self.ppu_read(attr_addr);
-            let shift     = (((coarse_y % 4) / 2) * 2 + ((coarse_x % 4) / 2)) * 2;
-            let palette_idx = (attr_byte >> shift) & 0x03;
+                // Nametable → tile index
+                let nt_addr  = base_nt + nt_row + (coarse_x % 32);
+                let tile_idx = self.ppu_read(nt_addr) as u16;
 
-            // Dados do padrão (plano 0 e 1)
-            let pattern_lo = self.ppu_read(pt_base + tile_idx * 16 + fine_y);
-            let pattern_hi = self.ppu_read(pt_base + tile_idx * 16 + fine_y + 8);
+                // Atributo → palette index
+                let attr_x    = (coarse_x % 32) / 4;
+                let attr_addr = base_nt + 0x03C0 + attr_y * 8 + attr_x;
+                let attr_byte = self.ppu_read(attr_addr);
+                let shift     = attr_shift_y + ((coarse_x % 4) / 2) * 2;
+                let palette_idx = ((attr_byte >> shift) & 0x03) as u16;
 
-            let col_bit  = 7 - fine_x;
-            let lo       = (pattern_lo >> col_bit) & 1;
-            let hi       = (pattern_hi >> col_bit) & 1;
-            let color_idx = (hi << 1) | lo;
+                // Pattern planes
+                pattern_lo = self.ppu_read(pt_base + tile_idx * 16 + fine_y);
+                pattern_hi = self.ppu_read(pt_base + tile_idx * 16 + fine_y + 8);
 
-            let palette_addr: u16 = if color_idx == 0 {
-                0x3F00
-            } else {
-                0x3F00 + palette_idx as u16 * 4 + color_idx as u16
-            };
+                // Resolve as 4 cores do tile de uma vez (0 = cor de fundo universal)
+                let bg_color = {
+                    let c = (self.ppu_read(0x3F00) & 0x3F) as usize;
+                    NES_PALETTE[c]
+                };
+                tile_colors[0] = bg_color;
+                for ci in 1u16..4 {
+                    let c = (self.ppu_read(0x3F00 + palette_idx * 4 + ci) & 0x3F) as usize;
+                    tile_colors[ci as usize] = NES_PALETTE[c];
+                }
+            }
 
-            let nes_color = (self.ppu_read(palette_addr) & 0x3F) as usize;
-            let (r, g, b) = NES_PALETTE[nes_color];
-            let offset = (self.scanline as usize * 256 + pixel_x as usize) * 3;
+            // Extrai pixel do par de bitplanes
+            let col_bit   = 7 - fine_x;
+            let lo        = (pattern_lo >> col_bit) & 1;
+            let hi        = (pattern_hi >> col_bit) & 1;
+            let color_idx = ((hi << 1) | lo) as usize;
+
+            let (r, g, b) = tile_colors[color_idx];
+            let offset = (fb_row + pixel_x as usize) * 3;
             self.framebuffer[offset]     = r;
             self.framebuffer[offset + 1] = g;
             self.framebuffer[offset + 2] = b;
