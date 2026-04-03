@@ -64,6 +64,26 @@ impl Nes {
         }
     }
 
+    /// Igual a step_frame(), mas retorna o tempo de execução em microssegundos.
+    fn step_frame_timed(&mut self) -> u64 {
+        let start = std::time::Instant::now();
+        let frame = self.bus.ppu.frame;
+        while self.bus.ppu.frame == frame {
+            let cpu_cycles = self.cpu.step(&mut self.bus);
+            for _ in 0..cpu_cycles {
+                self.bus.apu.tick();
+            }
+            for _ in 0..(cpu_cycles as u32 * 3) {
+                self.bus.ppu.tick();
+                if self.bus.ppu.nmi_triggered {
+                    self.bus.ppu.nmi_triggered = false;
+                    self.cpu.nmi(&mut self.bus);
+                }
+            }
+        }
+        start.elapsed().as_micros() as u64
+    }
+
     /// Retorna o framebuffer RGB atual (256 * 240 * 3 bytes).
     fn get_framebuffer(&self) -> Vec<u8> {
         self.bus.ppu.framebuffer.clone()
