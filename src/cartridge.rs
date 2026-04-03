@@ -20,6 +20,8 @@ pub struct Cartridge {
     pub mmc1_chr0: u8,            // CHR bank 0
     pub mmc1_chr1: u8,            // CHR bank 1
     pub mmc1_prg: u8,             // PRG bank selecionado
+    // UxROM (Mapper 2) state
+    pub uxrom_prg_bank: u8,       // banco selecionável (0x8000–0xBFFF)
 }
 
 impl Cartridge {
@@ -41,9 +43,9 @@ impl Cartridge {
 
         // Mapper = nibble alto do byte 7 | nibble alto do byte 6
         let mapper = (flags7 & 0xF0) | (flags6 >> 4);
-        if mapper != 0 && mapper != 1 {
+        if mapper != 0 && mapper != 1 && mapper != 2 {
             return Err(format!(
-                "Mapper {} não suportado — apenas Mapper 0 (NROM) e Mapper 1 (MMC1) estão implementados",
+                "Mapper {} não suportado — apenas Mapper 0 (NROM), Mapper 1 (MMC1) e Mapper 2 (UxROM) estão implementados",
                 mapper
             ));
         }
@@ -87,6 +89,7 @@ impl Cartridge {
             mmc1_chr0: 0,
             mmc1_chr1: 0,
             mmc1_prg: 0,
+            uxrom_prg_bank: 0,
         })
     }
 
@@ -121,12 +124,30 @@ impl Cartridge {
                     self.prg_rom[offset]
                 }
             }
+            2 => {
+                // UxROM: 0x8000–0xBFFF = banco selecionável; 0xC000–0xFFFF = último banco (fixo)
+                let prg_banks = self.prg_rom.len() / 0x4000;
+                if addr < 0x4000 {
+                    let bank = self.uxrom_prg_bank as usize % prg_banks;
+                    self.prg_rom[bank * 0x4000 + addr as usize]
+                } else {
+                    let last = prg_banks - 1;
+                    self.prg_rom[last * 0x4000 + (addr - 0x4000) as usize]
+                }
+            }
             _ => 0,
         }
     }
 
-    /// Processa uma escrita em 0x8000–0xFFFF (MMC1 shift register).
+    /// Processa uma escrita em 0x8000–0xFFFF (mapper register).
     pub fn write_prg(&mut self, addr: u16, value: u8) {
+        // UxROM: qualquer escrita em 0x8000–0xFFFF seleciona o banco PRG-LO
+        if self.mapper == 2 {
+            self.uxrom_prg_bank = value;
+            return;
+        }
+
+        // MMC1 shift register
         if value & 0x80 != 0 {
             // Reset do shift register
             self.mmc1_shift = 0;
@@ -165,7 +186,8 @@ impl Cartridge {
     /// Lê do espaço CHR (0x0000..=0x1FFF) com suporte a bank switching MMC1.
     pub fn read_chr(&self, addr: u16) -> u8 {
         match self.mapper {
-            0 => {
+            0 | 2 => {
+                // Mapper 0 (NROM) e Mapper 2 (UxROM): CHR fixo em 8 KB ou CHR-RAM
                 if self.chr_rom.is_empty() {
                     self.chr_ram.get(addr as usize & 0x1FFF).copied().unwrap_or(0)
                 } else {

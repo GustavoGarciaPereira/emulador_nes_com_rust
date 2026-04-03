@@ -7,7 +7,7 @@ Emulador do Nintendo Entertainment System (NES) com arquitetura híbrida:
 - **Python** cuida do frontend: janela, input do usuário e rendering via Pygame.
 - **Bridge** entre os dois via [PyO3](https://pyo3.rs/) + [maturin](https://www.maturin.rs/), gerando uma biblioteca `.so` importável pelo Python.
 
-O objetivo é ter um emulador funcional capaz de rodar ROMs NES reais, com suporte aos mappers 0 (NROM) e 1 (MMC1).
+O objetivo é ter um emulador funcional capaz de rodar ROMs NES reais, com suporte aos mappers 0 (NROM), 1 (MMC1) e 2 (UxROM).
 
 ---
 
@@ -42,14 +42,14 @@ nes-emulator/
     ├── lib.rs          # Bridge PyO3 — expõe struct Nes ao Python
     ├── cpu.rs          # CPU MOS 6502 (completa: oficiais + ilegais)
     ├── bus.rs          # Barramento de memória com mapa do NES
-    ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM) + Mapper 1 (MMC1)
+    ├── cartridge.rs    # Parser iNES + Mapper 0 (NROM) + Mapper 1 (MMC1) + Mapper 2 (UxROM)
     ├── ppu.rs          # PPU: rendering de background, VBlank, NMI
     └── apu.rs          # APU: Pulse 1, Pulse 2, Triangle, Noise
 ```
 
-> **Estado atual:** CPU, Bus, Cartridge (Mapper 0 + Mapper 1/MMC1), PPU, Input e APU implementados.
+> **Estado atual:** CPU, Bus, Cartridge (Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM), PPU, Input e APU implementados.
 > O pipeline completo funciona: `step_frame()` roda um frame inteiro, `get_framebuffer()` retorna o buffer RGB e `get_audio_samples()` retorna amostras f32 para o Pygame.
-> Próxima etapa: suporte a mappers adicionais (UxROM/Mapper 2, MMC3/Mapper 4, etc.).
+> Próxima etapa: suporte a mappers adicionais (MMC3/Mapper 4, etc.).
 
 ---
 
@@ -117,7 +117,7 @@ Mapeamento de memória real do NES:
 - OAM DMA lê diretamente de `self.ram` (evita recursão em `self.read`)
 - Escritas em 0x8000–0xFFFF chamam `cart.write_prg()` e sincronizam o estado MMC1 (`mmc1_chr0/chr1/control/mirroring`) para a PPU via variáveis locais (evita conflito de borrow entre `self.cartridge` e `self.ppu`)
 
-### ✅ Cartridge + Mapper 0 + Mapper 1/MMC1 (`src/cartridge.rs`) — IMPLEMENTADO
+### ✅ Cartridge + Mapper 0 + Mapper 1/MMC1 + Mapper 2/UxROM (`src/cartridge.rs`) — IMPLEMENTADO
 
 **Parser iNES (header 16 bytes):**
 - Valida magic `NES\x1A`
@@ -125,7 +125,7 @@ Mapeamento de memória real do NES:
 - Extrai mapper = `(flags7 & 0xF0) | (flags6 >> 4)`
 - Lê mirroring (horizontal / vertical / four-screen) — `Mirroring` é `Copy`
 - Desconta trainer opcional (512 bytes, bit 2 do flags6)
-- Aceita Mapper 0 e Mapper 1; retorna `Err` para outros
+- Aceita Mapper 0, Mapper 1 e Mapper 2; retorna `Err` para outros
 - Aloca `chr_ram: Vec<u8>` de 8 KB quando `chr_size == 0` (CHR-RAM)
 - **Validado: nestest.nes carrega, reset vector 0xC004 lido corretamente ✅**
 
@@ -160,6 +160,22 @@ Estado interno na struct `Cartridge`: `mmc1_shift` (5 bits), `mmc1_shift_count`,
 ```rust
 Horizontal, Vertical, FourScreen, SingleScreenLow, SingleScreenHigh
 ```
+
+**Mapper 2 (UxROM):**
+
+Estado interno na struct `Cartridge`: `uxrom_prg_bank: u8` (banco selecionável, inicializado em 0).
+
+`write_prg(addr, value)` — qualquer escrita em 0x8000–0xFFFF armazena `value` em `uxrom_prg_bank` diretamente (o `% prg_banks` em `read_prg` trata overflow). Curto-circuita antes da lógica MMC1.
+
+`read_prg`:
+| Janela | Banco |
+|--------|-------|
+| 0x8000–0xBFFF | `uxrom_prg_bank % prg_banks` (selecionável) |
+| 0xC000–0xFFFF | último banco — sempre fixo |
+
+`read_chr`: CHR fixo em 8 KB — compartilha o mesmo arm do Mapper 0 (`0 | 2 =>`). Usa `chr_rom[addr & 0x1FFF]` se disponível, senão `chr_ram` (CHR-RAM de 8 KB alocada no load).
+
+Jogos notáveis que usam UxROM: Mega Man, Contra, Castlevania, DuckTales.
 
 ### ✅ PPU (`src/ppu.rs`) — COMPLETA (background + sprites + scroll)
 
@@ -301,7 +317,7 @@ Horizontal, Vertical, FourScreen, SingleScreenLow, SingleScreenHigh
 from nes_core import Nes
 
 nes = Nes()                    # construtor vazio (para testes unitários)
-nes.load_rom("roms/rom.nes")   # carrega ROM (mapper 0 ou 1), copia CHR-ROM/RAM + estado MMC1 para PPU, faz reset
+nes.load_rom("roms/rom.nes")   # carrega ROM (mapper 0, 1 ou 2), copia CHR-ROM/RAM + estado MMC1 para PPU, faz reset
 
 nes.reset()                    # re-executa o reset vector
 nes.step()                     # executa 1 instrução + 3 ciclos PPU/ciclo + verifica NMI
@@ -325,7 +341,7 @@ nes.set_input(buttons: u8)        # atualiza estado do controle 1 (bitmask, ver 
 nes.get_audio_samples()           # -> Vec<f32>  (~734 amostras por frame a 44100 Hz; esvazia o buffer)
 ```
 
-> **Próximo passo:** suporte a mappers adicionais (UxROM/Mapper 2, MMC3/Mapper 4, etc.).
+> **Próximo passo:** suporte a mappers adicionais (MMC3/Mapper 4, UxROM-variant/Mapper 94, etc.).
 
 ---
 

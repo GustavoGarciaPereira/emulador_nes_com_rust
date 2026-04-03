@@ -41,6 +41,7 @@ A Nintendo Entertainment System emulator written in **Rust** (core) + **Python**
 | **Input** | ✅ Implementado | Protocolo serial NES, mapeamento completo de teclado |
 | **Mapper 0** | ✅ | NROM (16 KB espelhado e 32 KB) |
 | **Mapper 1** | ✅ | MMC1 — PRG/CHR bank switching 4 modos, CHR-RAM, mirroring dinâmico |
+| **Mapper 2** | ✅ | UxROM — PRG bank switching 16 KB (lo selecionável, hi fixo no último banco), CHR fixo ou CHR-RAM |
 | **Frontend** | ✅ | Pygame, escala 3×, 60.098 fps (NTSC exato via `tick_busy_loop`), áudio 44100 Hz estéreo com backpressure |
 | **Bridge** | ✅ | PyO3 + maturin — módulo `.so` importável pelo Python |
 
@@ -59,6 +60,10 @@ Testados e funcionando:
 | Mega Man 2 | Mapper 1 (MMC1) |
 | The Legend of Zelda | Mapper 1 (MMC1) |
 | Metroid | Mapper 1 (MMC1) |
+| Mega Man | Mapper 2 (UxROM) |
+| Contra | Mapper 2 (UxROM) |
+| Castlevania | Mapper 2 (UxROM) |
+| DuckTales | Mapper 2 (UxROM) |
 
 > ROMs proprietárias não estão incluídas no repositório. Use apenas ROMs que você possui legalmente.
 
@@ -145,6 +150,7 @@ O emulador usa uma arquitetura híbrida: o core de hardware roda em Rust para m�
 │                    │   Cartridge     │                       │
 │                    │  Mapper 0 NROM  │                       │
 │                    │  Mapper 1 MMC1  │                       │
+│                    │  Mapper 2 UxROM │                       │
 │                    └─────────────────┘                       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -158,13 +164,13 @@ O emulador usa uma arquitetura híbrida: o core de hardware roda em Rust para m�
 | `bus.rs` | Barramento de memória, mapa de endereços |
 | `ppu.rs` | PPU — rendering, VBlank, NMI |
 | `apu.rs` | APU — síntese de áudio |
-| `cartridge.rs` | Parser iNES, Mapper 0, Mapper 1/MMC1 |
+| `cartridge.rs` | Parser iNES, Mapper 0, Mapper 1/MMC1, Mapper 2/UxROM |
 
 ---
 
 ## 🗺️ Roadmap
 
-- [ ] **Mapper 2** (UxROM) — Mega Man, Castlevania, Contra
+- [x] **Mapper 2** (UxROM) — Mega Man, Castlevania, Contra, DuckTales
 - [ ] **Mapper 4** (MMC3) — Super Mario Bros 3, Mega Man 3–6
 - [ ] **APU DMC** — canal de sample delta (PCM)
 - [ ] **Save States** — salvar e carregar estado completo
