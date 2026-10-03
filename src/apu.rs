@@ -475,15 +475,16 @@ impl Apu {
         }
 
         // Frame counter (em ciclos de CPU)
+        // NTSC: quarter frame a cada ~7457 ciclos; half frame a cada ~14915
         self.frame_counter = self.frame_counter.wrapping_add(1);
         let fc = self.frame_counter;
         if !self.frame_mode {
-            // 4-step mode
+            // 4-step: quarter em 7457/22371, half em 14915/29829
             match fc {
-                3729  => self.clock_quarter(),
-                7457  => { self.clock_quarter(); self.clock_half(); }
-                11186 => self.clock_quarter(),
-                14915 => {
+                7457  => self.clock_quarter(),
+                14915 => { self.clock_quarter(); self.clock_half(); }
+                22371 => self.clock_quarter(),
+                29829 => {
                     self.clock_quarter();
                     self.clock_half();
                     self.frame_counter = 0;
@@ -491,13 +492,12 @@ impl Apu {
                 _ => {}
             }
         } else {
-            // 5-step mode
+            // 5-step: quarter em 7457/22371/37281, half em 14915/37281
             match fc {
-                3729  => self.clock_quarter(),
-                7457  => { self.clock_quarter(); self.clock_half(); }
-                11186 => self.clock_quarter(),
-                // step 4 sem clock (14915 é idle)
-                18641 => {
+                7457  => self.clock_quarter(),
+                14915 => { self.clock_quarter(); self.clock_half(); }
+                22371 => self.clock_quarter(),
+                37281 => {
                     self.clock_quarter();
                     self.clock_half();
                     self.frame_counter = 0;

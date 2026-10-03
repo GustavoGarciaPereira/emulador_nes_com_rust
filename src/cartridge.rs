@@ -24,6 +24,9 @@ pub struct Cartridge {
     pub uxrom_prg_bank: u8,       // banco selecionável (0x8000–0xBFFF)
     // CNROM (Mapper 3) state
     pub cnrom_chr_bank: u8,       // banco CHR selecionado (8 KB por banco)
+    // WRAM (0x6000–0x7FFF)
+    pub prg_ram: [u8; 8192],      // 8 KB de RAM de trabalho do cartucho
+    pub mmc1_prg_ram_disable: bool, // bit 4 do registrador PRG do MMC1 (1 = desabilitada)
 }
 
 impl Cartridge {
@@ -93,6 +96,8 @@ impl Cartridge {
             mmc1_prg: 0,
             uxrom_prg_bank: 0,
             cnrom_chr_bank: 0,
+            prg_ram: [0u8; 8192],
+            mmc1_prg_ram_disable: false,
         })
     }
 
@@ -190,7 +195,11 @@ impl Cartridge {
                 }
                 0xA000..=0xBFFF => self.mmc1_chr0 = data,
                 0xC000..=0xDFFF => self.mmc1_chr1 = data,
-                0xE000..=0xFFFF => self.mmc1_prg = data & 0x0F,
+                0xE000..=0xFFFF => {
+                    self.mmc1_prg = data & 0x0F;
+                    // bit 4: PRG RAM disable (1 = desabilitada)
+                    self.mmc1_prg_ram_disable = data & 0x10 != 0;
+                }
                 _ => {}
             }
         }

@@ -49,6 +49,8 @@ pub struct Ppu {
 
     // Framebuffer RGB: 256 * 240 * 3 bytes
     pub framebuffer: Vec<u8>,
+    // Opacidade do pixel de BG na scanline atual (sprite 0 hit / prioridade)
+    bg_opaque: [bool; 256],
 }
 
 impl Ppu {
@@ -80,6 +82,7 @@ impl Ppu {
             frame: 0,
             nmi_triggered: false,
             framebuffer: vec![0u8; 256 * 240 * 3],
+            bg_opaque: [false; 256],
         }
     }
 
@@ -106,6 +109,8 @@ impl Ppu {
         if self.scanline < 240 && self.cycle == 257 {
             if self.mask & 0x08 != 0 {
                 self.render_background();
+            } else {
+                self.bg_opaque = [false; 256];
             }
             if self.mask & 0x10 != 0 {
                 self.render_sprites();
@@ -148,7 +153,10 @@ impl Ppu {
                     self.palette[idx]
                 } else {
                     let ret = self.vram_read_buf;
-                    if (0x2000..=0x3EFF).contains(&addr) {
+                    if addr < 0x2000 {
+                        // CHR-ROM/RAM também preenche o buffer de leitura
+                        self.vram_read_buf = self.ppu_read(addr);
+                    } else if (0x2000..=0x3EFF).contains(&addr) {
                         let mirrored = mirror_vram_addr(addr, self.mirroring) as usize;
                         self.vram_read_buf = self.vram[mirrored];
                     }
@@ -286,7 +294,12 @@ impl Ppu {
             let hi        = (pattern_hi >> col_bit) & 1;
             let color_idx = ((hi << 1) | lo) as usize;
 
-            let (r, g, b) = tile_colors[color_idx];
+            // Clipping da coluna esquerda (bit 1 do PPUMASK): pixels 0-7 = backdrop
+            let visible = pixel_x >= 8 || self.mask & 0x02 != 0;
+            self.bg_opaque[pixel_x as usize] = visible && color_idx != 0;
+            let draw_idx = if visible { color_idx } else { 0 };
+
+            let (r, g, b) = tile_colors[draw_idx];
             let offset = (fb_row + pixel_x as usize) * 3;
             self.framebuffer[offset]     = r;
             self.framebuffer[offset + 1] = g;
@@ -336,22 +349,27 @@ impl Ppu {
 
                 let px = sprite_x + col;
                 if px < 0 || px >= 256 { continue; }
+                // Clipping da coluna esquerda para sprites (bit 2 do PPUMASK)
+                if px < 8 && self.mask & 0x04 == 0 { continue; }
 
-                let fb_offset = (scanline as usize * 256 + px as usize) * 3;
+                let bg_opaque = self.bg_opaque[px as usize];
 
-                // Sprite 0 Hit: sprite 0 com pixel opaco sobre background opaco
-                if i == 0 {
+                // Sprite 0 Hit: pixel opaco do sprite 0 sobre pixel opaco do BG,
+                // nunca em x=255 (comportamento do hardware)
+                if i == 0 && px != 255 && bg_opaque {
                     self.status |= 0x40;
                 }
 
-                if !behind_bg {
-                    let palette_addr = 0x3F10 + palette_idx * 4 + color_idx as u16;
-                    let color = self.ppu_read(palette_addr) & 0x3F;
-                    let (r, g, b) = NES_PALETTE[color as usize];
-                    self.framebuffer[fb_offset]     = r;
-                    self.framebuffer[fb_offset + 1] = g;
-                    self.framebuffer[fb_offset + 2] = b;
-                }
+                // Prioridade: sprite atrás do BG só aparece sobre pixel transparente
+                if behind_bg && bg_opaque { continue; }
+
+                let fb_offset = (scanline as usize * 256 + px as usize) * 3;
+                let palette_addr = 0x3F10 + palette_idx * 4 + color_idx as u16;
+                let color = self.ppu_read(palette_addr) & 0x3F;
+                let (r, g, b) = NES_PALETTE[color as usize];
+                self.framebuffer[fb_offset]     = r;
+                self.framebuffer[fb_offset + 1] = g;
+                self.framebuffer[fb_offset + 2] = b;
             }
         }
     }

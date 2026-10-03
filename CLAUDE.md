@@ -109,7 +109,8 @@ Mapeamento de memória real do NES:
 | 0x4000–0x4013, 0x4015, 0x4017 (escrita) | APU — `apu.write(addr, value)`               |
 | 0x4016 (escrita)              | Controlador — strobe                                        |
 | 0x4018–0x401F                 | Expansão — ignorado                                         |
-| 0x4020–0x7FFF                 | Expansão / SRAM (stub — retorna 0)                           |
+| 0x4020–0x5FFF                 | Expansão (stub — retorna 0)                                  |
+| 0x6000–0x7FFF                 | WRAM (8 KB) do cartucho; respeita o bit de disable do MMC1 (mapper 1) |
 | 0x8000–0xFFFF                 | PRG-ROM via `Cartridge::read_prg()`; escritas vão para `Cartridge::write_prg()` (mapper) |
 
 - `Bus::read` é `&mut self` (registradores PPU têm side effects na leitura)
@@ -196,6 +197,8 @@ O Bus Conflict existe porque no CNROM o barramento de dados é compartilhado ent
 
 Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps), Adventure Island.
 
+**WRAM (todos os mappers):** `prg_ram: [u8; 8192]` em `Cartridge` mapeada em 0x6000–0x7FFF pelo `Bus` (leitura e escrita). Para o MMC1, o bit 4 do registrador PRG (0xE000–0xFFFF) controla `mmc1_prg_ram_disable`: quando setado, leituras retornam 0 e escritas são ignoradas. Jogos que salvam progresso (Zelda, Metroid) usam essa região.
+
 ### ✅ PPU (`src/ppu.rs`) — COMPLETA (background + sprites + scroll)
 
 **Struct `Ppu`** — campos principais:
@@ -208,6 +211,7 @@ Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps), Adv
 - `mapper: u8`, `mmc1_chr0: u8`, `mmc1_chr1: u8`, `mmc1_control: u8` — estado MMC1 sincronizado do `Cartridge` pelo `Bus` a cada escrita em 0x8000–0xFFFF
 - `cnrom_chr_bank: u8` — banco CHR selecionado para Mapper 3 (CNROM), sincronizado do `Cartridge` pelo `Bus` a cada escrita em 0x8000–0xFFFF
 - `framebuffer: Vec<u8>` — 256 × 240 × 3 bytes RGB
+- `bg_opaque: [bool; 256]` — opacidade do BG por pixel da scanline atual (usado pelo Sprite 0 Hit e pela prioridade sprite/BG)
 
 **Timing** (262 scanlines × 341 ciclos):
 
@@ -239,17 +243,19 @@ Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps), Adv
 - Atributo de paleta: `base_nt + 0x3C0 + attr_y*8 + attr_x`
 - **Otimização de cache por tile:** termos que dependem só de `y` (coarse_y, fine_y, nt_y, attr_y, nt_row) são calculados 1×/scanline. Dados do tile (tile_idx, palette_idx, pattern_lo/hi, tile_colors[4]) são recalculados apenas quando `coarse_x` muda (a cada 8 pixels). No loop interno de pixel, zero chamadas a `ppu_read`. Resultado: ~245.760 → ~31.680 chamadas `ppu_read`/frame (**≈ 8× menos**).
 
-**Renderização de sprites** (`render_sprites`) — novo:
+**Renderização de sprites** (`render_sprites`):
 - Itera OAM de 63→0 (reverso = sprite 0 sobrescreve em empate, prioridade correta)
 - Cada sprite: Y, tile, atributos (flip H/V, paleta, prioridade vs BG), X
 - Pattern table de sprite: bit 3 de PPUCTRL (`$0000` ou `$1000`)
 - Paleta de sprite: `0x3F10 + paleta×4 + cor`
 - Flip vertical: `row = 7 - row`; flip horizontal: inverte bit de leitura
 - Pixels transparentes (color\_idx == 0) ignorados
-- Sprites com `behind_bg = true` (bit 5 de attrs) não são desenhados sobre o BG
+- Clipping da coluna esquerda (bit 2 do PPUMASK): pixels x<8 não são desenhados quando o bit está limpo
+- Sprites com `behind_bg = true` (bit 5 de attrs) só são desenhados onde o BG é transparente (`bg_opaque[x] == false`)
 
 **Sprite 0 Hit:**
-- Bit 6 do PPUSTATUS setado quando sprite 0 tem pixel opaco na scanline atual
+- Bit 6 do PPUSTATUS setado quando sprite 0 tem pixel opaco sobre um pixel **opaco do BG** (`bg_opaque[x]`), nunca em x=255
+- `bg_opaque: [bool; 256]` é preenchido em `render_background` (respeitando o clipping esquerdo do BG — bit 1 do PPUMASK) e zerado quando o BG está desligado
 - Limpo na scanline 261 (pré-render), junto com VBlank e Sprite Overflow
 
 **Memória PPU** (`ppu_read` / `write_register` PPUDATA):
@@ -294,13 +300,13 @@ Jogos notáveis que usam CNROM: Q*bert, Gradius, Donkey Kong (alguns dumps), Adv
 
 **Frame counter** (`frame_mode` = false → 4-step, true → 5-step):
 
-| Ciclo CPU | 4-step          | 5-step          |
-|-----------|-----------------|-----------------|
-| 3729      | quarter         | quarter         |
-| 7457      | quarter + half  | quarter + half  |
-| 11186     | quarter         | quarter         |
-| 14915     | quarter + half + reset | —        |
-| 18641     | —               | quarter + half + reset |
+| Ciclo CPU | 4-step                   | 5-step                   |
+|-----------|--------------------------|--------------------------|
+| 7457      | quarter                  | quarter                  |
+| 14915     | quarter + half           | quarter + half           |
+| 22371     | quarter                  | quarter                  |
+| 29829     | quarter + half + reset   | —                        |
+| 37281     | —                        | quarter + half + reset   |
 
 - **Quarter frame:** clock envelope (Pulse 1, Pulse 2, Noise) + linear counter (Triangle)
 - **Half frame:** clock length counters + sweep (Pulse 1, Pulse 2, Triangle, Noise)

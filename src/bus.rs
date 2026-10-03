@@ -45,8 +45,20 @@ impl Bus {
             0x4015 => 0, // stub: retorna 0 (sem IRQ, sem DMC)
             // APU / IO — stub
             0x4000..=0x401F => 0,
-            // Expansão / SRAM — stub
-            0x4020..=0x7FFF => 0,
+            // Expansão — stub
+            0x4020..=0x5FFF => 0,
+            // WRAM do cartucho (0x6000–0x7FFF)
+            0x6000..=0x7FFF => {
+                if let Some(cart) = &self.cartridge {
+                    if cart.mapper == 1 && cart.mmc1_prg_ram_disable {
+                        0
+                    } else {
+                        cart.prg_ram[(addr - 0x6000) as usize]
+                    }
+                } else {
+                    0
+                }
+            }
             // PRG-ROM do cartucho
             0x8000..=0xFFFF => {
                 if let Some(cart) = &self.cartridge {
@@ -86,7 +98,15 @@ impl Bus {
             // (0x4014 = OAM DMA e 0x4016 = controller já tratados acima)
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write(addr, value),
             0x4018..=0x401F => {} // expansão — ignorado
-            0x4020..=0x7FFF => {} // Expansão / SRAM — ignorado
+            0x4020..=0x5FFF => {} // expansão — ignorado
+            0x6000..=0x7FFF => {
+                // WRAM do cartucho (respeita o disable do MMC1)
+                if let Some(cart) = &mut self.cartridge {
+                    if !(cart.mapper == 1 && cart.mmc1_prg_ram_disable) {
+                        cart.prg_ram[(addr - 0x6000) as usize] = value;
+                    }
+                }
+            }
             0x8000..=0xFFFF => {
                 // Escreve no mapper (MMC1 shift register, etc.)
                 // Lê o estado atualizado em variáveis locais para evitar conflito de borrow
